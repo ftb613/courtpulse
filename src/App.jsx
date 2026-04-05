@@ -1,675 +1,884 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { supabase, isConnected } from "./supabase";
+import { useState, useRef, useEffect, useCallback } from "react";
 
-// ─── Demo Data (used when Supabase isn't configured) ───────────────────────────
-const DEMO_COURTS = [
-  { id: "c1", label: "Court 1", court_number: 1, status: "in-use", paddles_waiting: 4, lastReport: "8m ago", reporter: "Mike R." },
-  { id: "c2", label: "Court 2", court_number: 2, status: "in-use", paddles_waiting: 2, lastReport: "12m ago", reporter: "Sarah K." },
-  { id: "c3", label: "Court 3", court_number: 3, status: "in-use", paddles_waiting: 0, lastReport: "5m ago", reporter: "Jay L." },
-  { id: "c4", label: "Court 4", court_number: 4, status: "open", paddles_waiting: 0, lastReport: "22m ago", reporter: "Priya M." },
-  { id: "c5", label: "Court 5", court_number: 5, status: "in-use", paddles_waiting: 6, lastReport: "3m ago", reporter: "Tom B." },
-  { id: "c6", label: "Court 6", court_number: 6, status: "open", paddles_waiting: 0, lastReport: "30m ago", reporter: "Lisa W." },
-];
-
-const DEMO_FEED = [
-  { id: "f1", user_name: "Mike R.", created_at: new Date(Date.now() - 8*60000).toISOString(), text: "Courts 1 & 2 have a solid group going. Court 4 is wide open.", verified: true },
-  { id: "f2", user_name: "Sarah K.", created_at: new Date(Date.now() - 12*60000).toISOString(), text: "Wind is picking up from the south, heads up. Otherwise great conditions.", verified: true },
-  { id: "f3", user_name: "Priya M.", created_at: new Date(Date.now() - 22*60000).toISOString(), text: "Just got here, courts 4 and 6 are open. Brought an extra paddle if anyone needs one!", verified: false },
-  { id: "f4", user_name: "Tom B.", created_at: new Date(Date.now() - 38*60000).toISOString(), text: "Court 5 has a long wait — 6 paddles deep. I'd try the other side.", verified: true },
-];
-
-const DEMO_CHAT = [
-  { id: "m1", user_name: "Mike R.", created_at: new Date(Date.now() - 30*60000).toISOString(), text: "Anyone want to run 4s on court 4? Need 2 more" },
-  { id: "m2", user_name: "Sarah K.", created_at: new Date(Date.now() - 27*60000).toISOString(), text: "I'm in! Heading over in 10" },
-  { id: "m3", user_name: "Jay L.", created_at: new Date(Date.now() - 24*60000).toISOString(), text: "Same, be there in 15. Who's got balls?" },
-  { id: "m4", user_name: "Mike R.", created_at: new Date(Date.now() - 23*60000).toISOString(), text: "I've got a fresh can. Court 4 in 15 let's go 🏓" },
-  { id: "m5", user_name: "Priya M.", created_at: new Date(Date.now() - 15*60000).toISOString(), text: "Courts 1-3 are starting to clear out if anyone needs a spot" },
-  { id: "m6", user_name: "Tom B.", created_at: new Date(Date.now() - 5*60000).toISOString(), text: "Good games this morning. Court 5 finally freed up" },
-];
-
-const PARK = { name: "Marine Park", address: "Fillmore Ave & Marine Pkwy, Brooklyn", totalCourts: 6, hours: "6 AM – 9 PM", surface: "Asphalt", amenities: ["Restrooms","Water Fountain","Benches","Parking Lot"] };
-
-const SCHEDULED = [
-  { day: "Mon", time: "6–8 PM", name: "Open Play Night", type: "open" },
-  { day: "Wed", time: "6–8 PM", name: "Intermediate Mixer", type: "open" },
-  { day: "Thu", time: "9–11 AM", name: "Senior Morning Play", type: "open" },
-  { day: "Sat", time: "8 AM–12 PM", name: "Weekend Open Play", type: "open" },
-  { day: "Sat", time: "1–4 PM", name: "League Matches", type: "league" },
-  { day: "Sun", time: "9 AM–1 PM", name: "Sunday Social", type: "open" },
-];
-
-const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
-const HOURS_LABELS = ["6a","7a","8a","9a","10a","11a","12p","1p","2p","3p","4p","5p","6p","7p","8p"];
-
-function getPrediction(dayIdx, hourIdx) {
-  const seed = (dayIdx * 17 + hourIdx * 11) % 100;
-  const isWeekend = dayIdx === 0 || dayIdx === 6;
-  const isMorning = hourIdx >= 2 && hourIdx <= 5;
-  const isEvening = hourIdx >= 10 && hourIdx <= 13;
-  let base = seed / 100;
-  if (isWeekend) base = Math.min(1, base + 0.3);
-  if (isMorning) base = Math.min(1, base + 0.25);
-  if (isEvening) base = Math.min(1, base + 0.15);
-  if (hourIdx <= 1 || hourIdx >= 13) base = Math.max(0, base - 0.25);
-  return Math.max(0, Math.min(1, base));
-}
-
-function getOcc(v) {
-  if (v < 0.3) return { label: "Low", color: "#22c55e", bg: "#f0fdf4", emoji: "🟢" };
-  if (v < 0.6) return { label: "Moderate", color: "#ca8a04", bg: "#fefce8", emoji: "🟡" };
-  if (v < 0.8) return { label: "Busy", color: "#ea580c", bg: "#fff7ed", emoji: "🟠" };
-  return { label: "Packed", color: "#dc2626", bg: "#fef2f2", emoji: "🔴" };
-}
-
-function timeAgo(dateStr) {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
-}
-
-function formatTime(dateStr) {
-  return new Date(dateStr).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-}
-
-// ─── Icons ─────────────────────────────────────────────────────────────────────
-const Ic = {
-  back: <svg width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>,
-  pin: <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 110-5 2.5 2.5 0 010 5z"/></svg>,
-  clock: <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>,
-  check: <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>,
-  x: <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
-  send: <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>,
-  home: <svg width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M3 12l9-9 9 9"/><path d="M5 10v10a1 1 0 001 1h3v-6h6v6h3a1 1 0 001-1V10"/></svg>,
-  grid: <svg width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>,
-  feed: <svg width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>,
-  chat: <svg width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>,
-  report: <svg width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
-  shield: <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>,
-  trend: <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>,
-  cal: <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>,
-};
-
-// ─── Colors ────────────────────────────────────────────────────────────────────
+// ─── Design Tokens ───
 const C = {
-  bg: "#f5f3ef", card: "#ffffff", primary: "#16704c", primaryDark: "#0f5538", primaryLight: "#d1f2e0", primaryGhost: "#edf8f2",
-  text: "#1a1a18", sub: "#5c5c57", muted: "#9c9c96", border: "#e2dfda", borderLight: "#f0ede8",
-  green: "#22c55e", yellow: "#ca8a04", orange: "#ea580c", red: "#dc2626",
-  blue: "#2563eb", blueBg: "#eff6ff", blueLight: "#dbeafe",
-  purple: "#7c3aed", purpleBg: "#f5f3ff", purpleLight: "#ede9fe",
-  warm: "#b45309", warmBg: "#fffbeb",
+  bg: "#F4F5F7",
+  card: "#FFFFFF",
+  text: "#1B2028",
+  sub: "#5A6270",
+  muted: "#8E95A2",
+  border: "#E2E5EB",
+  primary: "#2B6CB0",
+  primaryLight: "#EBF2FA",
+  primaryDark: "#1A4A7A",
+  green: "#27AE60",
+  greenLight: "#E8F8EF",
+  yellow: "#E2A612",
+  yellowLight: "#FFF8E1",
+  orange: "#E67E22",
+  orangeLight: "#FFF0E0",
+  red: "#E74C3C",
+  redLight: "#FDECEB",
+  chatSelf: "#2B6CB0",
+  chatOther: "#FFFFFF",
+  banner: "#1A3A5C",
 };
-const ff = "'Nunito', 'Avenir', -apple-system, sans-serif";
-const fd = "'Fraunces', 'Georgia', serif";
 
-// ─── App ───────────────────────────────────────────────────────────────────────
-export default function App() {
-  // User identity
-  const [userName, setUserName] = useState(() => localStorage.getItem("courtpulse_name") || "");
-  const [nameInput, setNameInput] = useState("");
+const ff = "'DM Sans', 'Avenir', -apple-system, sans-serif";
 
-  // App state
-  const [tab, setTab] = useState("home");
-  const [courts, setCourts] = useState(DEMO_COURTS);
-  const [feed, setFeed] = useState(DEMO_FEED);
-  const [chatMsgs, setChatMsgs] = useState(DEMO_CHAT);
-  const [chatInput, setChatInput] = useState("");
-  const [toast, setToast] = useState(null);
-  const [reportCourt, setReportCourt] = useState(null);
-  const [reportPaddles, setReportPaddles] = useState(0);
-  const [reportStatus, setReportStatus] = useState("in-use");
-  const [reportComment, setReportComment] = useState("");
-  const [predDay, setPredDay] = useState(new Date().getDay());
-  const [feedInput, setFeedInput] = useState("");
-  const [showSuccess, setShowSuccess] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const chatEndRef = useRef(null);
+// ─── Court Data ───
+const COURT_TYPES = {
+  beginner: { label: "Beginner", sub: "4 on / 4 off", color: "#6C63FF" },
+  regular: { label: "Regular", sub: "4 on / 4 off", color: C.primary },
+  challenge: { label: "Challenge", sub: "2 on / 2 off · Winners stay", color: "#D4540E" },
+};
 
-  // ─── Supabase Data Loading ────────────────────────────────────────────
-  useEffect(() => {
-    async function loadData() {
-      if (!isConnected()) {
-        setLoading(false);
-        return;
-      }
+const INIT_COURTS = [
+  { id: 1, type: "beginner", stacks: 0, conditions: [], lastReport: "5m ago", reporter: "Mike T." },
+  { id: 2, type: "regular", stacks: 1, conditions: [], lastReport: "3m ago", reporter: "Sarah K." },
+  { id: 3, type: "regular", stacks: 2, conditions: [], lastReport: "1m ago", reporter: "Dave R." },
+  { id: 4, type: "challenge", stacks: 3, conditions: [], lastReport: "2m ago", reporter: "Tony B." },
+  { id: 5, type: "beginner", stacks: 0, conditions: ["windy"], lastReport: "8m ago", reporter: "Lisa M." },
+  { id: 6, type: "regular", stacks: 1, conditions: [], lastReport: "6m ago", reporter: "Jen P." },
+  { id: 7, type: "regular", stacks: 0, conditions: [], lastReport: "10m ago", reporter: "Ray S." },
+  { id: 8, type: "challenge", stacks: 2, conditions: ["windy"], lastReport: "4m ago", reporter: "Chris W." },
+];
 
-      try {
-        // Fetch courts
-        const { data: courtRows } = await supabase
-          .from("courts")
-          .select("*")
-          .order("court_number");
+const WEATHER = { temp: 72, high: 78, low: 61, wind: 12, icon: "Sun" };
+const COURT_HOURS = { open: "6:00 AM", close: "9:00 PM" };
 
-        if (courtRows?.length) {
-          // Fetch latest report for each court
-          const courtData = await Promise.all(
-            courtRows.map(async (c) => {
-              const { data: reports } = await supabase
-                .from("reports")
-                .select("*")
-                .eq("court_id", c.id)
-                .order("created_at", { ascending: false })
-                .limit(1);
-              const latest = reports?.[0];
-              return {
-                id: c.id,
-                label: c.label,
-                court_number: c.court_number,
-                status: latest?.status || "open",
-                paddles_waiting: latest?.paddles_waiting || 0,
-                lastReport: latest ? timeAgo(latest.created_at) : "No reports yet",
-                reporter: latest?.reporter_name || "—",
-              };
-            })
-          );
-          setCourts(courtData);
-        }
+const STATUS_MAP = (stacks) => {
+  if (stacks === 0) return { label: "Open", color: C.green, bg: C.greenLight };
+  if (stacks === 1) return { label: "1 Stack", color: C.yellow, bg: C.yellowLight };
+  if (stacks === 2) return { label: "2 Stacks", color: C.orange, bg: C.orangeLight };
+  return { label: stacks + " Stacks", color: C.red, bg: C.redLight };
+};
 
-        // Fetch feed
-        const { data: feedRows } = await supabase
-          .from("feed_posts")
-          .select("*")
-          .order("created_at", { ascending: false })
-          .limit(30);
-        if (feedRows?.length) setFeed(feedRows);
+const COURT_COLOR = (stacks) => {
+  if (stacks === 0) return { fill: "#27AE6044", stroke: "#27AE60" };
+  if (stacks === 1) return { fill: "#E2A61244", stroke: "#E2A612" };
+  if (stacks === 2) return { fill: "#E67E2244", stroke: "#E67E22" };
+  return { fill: "#E74C3C44", stroke: "#E74C3C" };
+};
 
-        // Fetch chat
-        const { data: chatRows } = await supabase
-          .from("chat_messages")
-          .select("*")
-          .order("created_at", { ascending: true })
-          .limit(100);
-        if (chatRows?.length) setChatMsgs(chatRows);
-      } catch (err) {
-        console.error("Failed to load data:", err);
-      }
-      setLoading(false);
-    }
-    loadData();
-  }, []);
+const CONDITION_OPTIONS = [
+  { key: "windy", icon: "Wind", label: "Windy" },
+  { key: "wet", icon: "Drop", label: "Wet Courts" },
+  { key: "hot", icon: "Temp", label: "Hot" },
+  { key: "perfect", icon: "Star", label: "Great" },
+];
 
-  // ─── Real-time Subscriptions ──────────────────────────────────────────
-  useEffect(() => {
-    if (!isConnected()) return;
+const makeCourtChat = (courtId) => [
+  { id: 1, name: "Mike T.", text: `Court ${courtId} is playing fast today`, time: "10:15 AM", self: false },
+  { id: 2, name: "Sarah K.", text: "Good games here this morning", time: "10:22 AM", self: false },
+];
 
-    const channel = supabase
-      .channel("courtpulse-realtime")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "reports" }, (payload) => {
-        const r = payload.new;
-        setCourts((prev) =>
-          prev.map((c) =>
-            c.id === r.court_id
-              ? { ...c, status: r.status, paddles_waiting: r.paddles_waiting, lastReport: "just now", reporter: r.reporter_name }
-              : c
-          )
-        );
-      })
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "feed_posts" }, (payload) => {
-        setFeed((prev) => [payload.new, ...prev].slice(0, 30));
-      })
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "chat_messages" }, (payload) => {
-        setChatMsgs((prev) => [...prev, payload.new].slice(-100));
-      })
-      .subscribe();
+const INIT_MAIN_CHAT = [
+  { id: 1, name: "Mike T.", text: "Courts are filling up, get here before 10 if you want to play", time: "9:42 AM", self: false },
+  { id: 2, name: "Sarah K.", text: "Heading over now, anyone need a partner?", time: "9:45 AM", self: false },
+  { id: 3, name: "Dave R.", text: "Challenge courts are running hot today. Good competition", time: "9:51 AM", self: false },
+  { id: 4, name: "Lisa M.", text: "Sprinklers hit court 5 area, a little wet near the baseline but playable", time: "10:02 AM", self: false },
+  { id: 5, name: "Jen P.", text: "Just left, courts 6 and 7 are about to open up", time: "10:18 AM", self: false },
+  { id: 6, name: "Tony B.", text: "Good morning everyone. Wind is picking up a bit, heads up if you're coming", time: "10:25 AM", self: false },
+];
 
-    return () => { supabase.removeChannel(channel); };
-  }, []);
+const OVERALL_LEVELS = [
+  { key: "empty", label: "Empty", desc: "No one playing", color: C.green },
+  { key: "half-play", label: "Half Playing", desc: "About half the courts in use", color: C.yellow },
+  { key: "all-play", label: "All Playing", desc: "Every court in use, no wait", color: C.orange },
+  { key: "1-stack-half", label: "1 Stack / Half", desc: "1 stack waiting at half the courts", color: C.orange },
+  { key: "1-stack-all", label: "1 Stack / All", desc: "1 stack waiting at every court", color: C.red },
+  { key: "2-stack", label: "2+ Stacks", desc: "2 or more stacks deep", color: C.red },
+];
 
-  useEffect(() => {
-    if (tab === "chat") chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatMsgs, tab]);
+const INIT_REPORTS = [
+  { id: 1, user: "Tony B.", time: "10:25 AM", level: "all-play", conditions: ["windy"], text: "Every court running, wind picking up from the east" },
+  { id: 2, user: "Lisa M.", time: "9:50 AM", level: "half-play", conditions: ["wet"], text: "Courts 4-5 side still damp from sprinklers" },
+  { id: 3, user: "Dave R.", time: "9:30 AM", level: "half-play", conditions: [], text: "Steady morning crowd, should fill up by 10" },
+];
 
-  // ─── Actions ──────────────────────────────────────────────────────────
-  const showToast = useCallback((m) => { setToast(m); setTimeout(() => setToast(null), 2600); }, []);
+// AI Prediction data — hourly busyness forecast per day of week
+const DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-  const saveName = useCallback(() => {
-    if (!nameInput.trim()) return;
-    const name = nameInput.trim();
-    localStorage.setItem("courtpulse_name", name);
-    setUserName(name);
-  }, [nameInput]);
+const AI_PREDICTIONS_BY_DAY = {
+  Mon: [
+    { hour: "6A", level: 0 }, { hour: "7A", level: 0 }, { hour: "8A", level: 1 },
+    { hour: "9A", level: 2 }, { hour: "10A", level: 2 }, { hour: "11A", level: 3 },
+    { hour: "12P", level: 2 }, { hour: "1P", level: 2 }, { hour: "2P", level: 1 },
+    { hour: "3P", level: 1 }, { hour: "4P", level: 2 }, { hour: "5P", level: 3 },
+    { hour: "6P", level: 2 }, { hour: "7P", level: 1 }, { hour: "8P", level: 0 },
+  ],
+  Tue: [
+    { hour: "6A", level: 0 }, { hour: "7A", level: 1 }, { hour: "8A", level: 2 },
+    { hour: "9A", level: 3 }, { hour: "10A", level: 3 }, { hour: "11A", level: 3 },
+    { hour: "12P", level: 2 }, { hour: "1P", level: 2 }, { hour: "2P", level: 1 },
+    { hour: "3P", level: 1 }, { hour: "4P", level: 2 }, { hour: "5P", level: 2 },
+    { hour: "6P", level: 1 }, { hour: "7P", level: 1 }, { hour: "8P", level: 0 },
+  ],
+  Wed: [
+    { hour: "6A", level: 0 }, { hour: "7A", level: 0 }, { hour: "8A", level: 1 },
+    { hour: "9A", level: 2 }, { hour: "10A", level: 3 }, { hour: "11A", level: 3 },
+    { hour: "12P", level: 3 }, { hour: "1P", level: 2 }, { hour: "2P", level: 2 },
+    { hour: "3P", level: 1 }, { hour: "4P", level: 2 }, { hour: "5P", level: 3 },
+    { hour: "6P", level: 2 }, { hour: "7P", level: 1 }, { hour: "8P", level: 0 },
+  ],
+  Thu: [
+    { hour: "6A", level: 0 }, { hour: "7A", level: 1 }, { hour: "8A", level: 2 },
+    { hour: "9A", level: 2 }, { hour: "10A", level: 3 }, { hour: "11A", level: 3 },
+    { hour: "12P", level: 2 }, { hour: "1P", level: 2 }, { hour: "2P", level: 1 },
+    { hour: "3P", level: 2 }, { hour: "4P", level: 3 }, { hour: "5P", level: 3 },
+    { hour: "6P", level: 2 }, { hour: "7P", level: 1 }, { hour: "8P", level: 0 },
+  ],
+  Fri: [
+    { hour: "6A", level: 0 }, { hour: "7A", level: 0 }, { hour: "8A", level: 1 },
+    { hour: "9A", level: 2 }, { hour: "10A", level: 3 }, { hour: "11A", level: 3 },
+    { hour: "12P", level: 3 }, { hour: "1P", level: 3 }, { hour: "2P", level: 2 },
+    { hour: "3P", level: 2 }, { hour: "4P", level: 3 }, { hour: "5P", level: 3 },
+    { hour: "6P", level: 2 }, { hour: "7P", level: 1 }, { hour: "8P", level: 0 },
+  ],
+  Sat: [
+    { hour: "6A", level: 0 }, { hour: "7A", level: 1 }, { hour: "8A", level: 2 },
+    { hour: "9A", level: 3 }, { hour: "10A", level: 4 }, { hour: "11A", level: 4 },
+    { hour: "12P", level: 4 }, { hour: "1P", level: 3 }, { hour: "2P", level: 2 },
+    { hour: "3P", level: 2 }, { hour: "4P", level: 3 }, { hour: "5P", level: 3 },
+    { hour: "6P", level: 2 }, { hour: "7P", level: 1 }, { hour: "8P", level: 0 },
+  ],
+  Sun: [
+    { hour: "6A", level: 0 }, { hour: "7A", level: 1 }, { hour: "8A", level: 2 },
+    { hour: "9A", level: 3 }, { hour: "10A", level: 4 }, { hour: "11A", level: 4 },
+    { hour: "12P", level: 3 }, { hour: "1P", level: 3 }, { hour: "2P", level: 2 },
+    { hour: "3P", level: 1 }, { hour: "4P", level: 2 }, { hour: "5P", level: 2 },
+    { hour: "6P", level: 1 }, { hour: "7P", level: 0 }, { hour: "8P", level: 0 },
+  ],
+};
 
-  const submitReport = useCallback(async () => {
-    if (!reportCourt) return;
-    if (isConnected()) {
-      await supabase.from("reports").insert({
-        court_id: reportCourt.id,
-        park_id: reportCourt.park_id || null,
-        status: reportStatus,
-        paddles_waiting: reportPaddles,
-        comment: reportComment || null,
-        reporter_name: userName,
-      });
-      if (reportComment.trim()) {
-        await supabase.from("feed_posts").insert({
-          park_id: reportCourt.park_id || null,
-          user_name: userName,
-          text: reportComment.trim(),
-        });
-      }
-    } else {
-      // Local fallback
-      setCourts((prev) =>
-        prev.map((c) =>
-          c.id === reportCourt.id
-            ? { ...c, status: reportStatus, paddles_waiting: reportPaddles, lastReport: "just now", reporter: userName || "You" }
-            : c
-        )
-      );
-      if (reportComment.trim()) {
-        setFeed((prev) => [{ id: Date.now().toString(), user_name: userName || "You", created_at: new Date().toISOString(), text: reportComment.trim() }, ...prev]);
-      }
-    }
-    setShowSuccess(true);
-    setTimeout(() => { setShowSuccess(false); setReportCourt(null); setReportComment(""); }, 1800);
-  }, [reportCourt, reportStatus, reportPaddles, reportComment, userName]);
+const PREDICTION_COLORS = [
+  C.green,      // 0 - Empty
+  "#7BC67E",    // 1 - Light
+  C.yellow,     // 2 - Moderate
+  C.orange,     // 3 - Busy
+  C.red,        // 4 - Packed
+];
 
-  const openReport = useCallback((court) => {
-    setReportCourt(court);
-    setReportPaddles(court.paddles_waiting);
-    setReportStatus(court.status);
-    setReportComment("");
-    setShowSuccess(false);
-  }, []);
+// ─── SVG Icons ───
+const Icons = {
+  Sun: (s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>,
+  Wind: (s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9.59 4.59A2 2 0 1111 8H2m10.59 11.41A2 2 0 1014 16H2m15.73-8.27A2.5 2.5 0 1119.5 12H2"/></svg>,
+  Drop: (s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 2.69l5.66 5.66a8 8 0 11-11.31 0z"/></svg>,
+  Temp: (s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M14 14.76V3.5a2.5 2.5 0 00-5 0v11.26a4.5 4.5 0 105 0z"/></svg>,
+  Star: (s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>,
+  Nav: (s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>,
+  Clock: (s = 14) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
+  Back: (s = 22) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg>,
+  Send: (s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>,
+  Home: (s = 22) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12l9-8 9 8"/><path d="M5 10v10a1 1 0 001 1h3v-5h6v5h3a1 1 0 001-1V10"/></svg>,
+  Chat: (s = 22) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>,
+  Report: (s = 22) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>,
+  Alert: (s = 14) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
+  Plus: (s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+  Minus: (s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+  Brain: (s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 2a6 6 0 016 6c0 2.5-1.5 4.5-3 5.5V16h-6v-2.5C7.5 12.5 6 10.5 6 8a6 6 0 016-6z"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>,
+};
 
-  const submitFeedComment = useCallback(async () => {
-    if (!feedInput.trim()) return;
-    if (isConnected()) {
-      await supabase.from("feed_posts").insert({ user_name: userName, text: feedInput.trim() });
-    } else {
-      setFeed((prev) => [{ id: Date.now().toString(), user_name: userName || "You", created_at: new Date().toISOString(), text: feedInput.trim() }, ...prev]);
-    }
-    setFeedInput("");
-    showToast("Comment posted!");
-  }, [feedInput, userName, showToast]);
+const CondIcon = ({ type, size = 16 }) => {
+  const fn = Icons[type];
+  return fn ? fn(size) : null;
+};
 
-  const submitQuickStatus = useCallback(async (text) => {
-    if (isConnected()) {
-      await supabase.from("feed_posts").insert({ user_name: userName, text });
-    } else {
-      setFeed((prev) => [{ id: Date.now().toString(), user_name: userName || "You", created_at: new Date().toISOString(), text }, ...prev]);
-    }
-    showToast("Status posted!");
-  }, [userName, showToast]);
+const FontLoader = () => (
+  <style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Fraunces:wght@700;800;900&display=swap');`}</style>
+);
 
-  const sendChat = useCallback(async () => {
-    if (!chatInput.trim()) return;
-    if (isConnected()) {
-      await supabase.from("chat_messages").insert({ user_name: userName, text: chatInput.trim() });
-    } else {
-      setChatMsgs((prev) => [...prev, { id: Date.now().toString(), user_name: userName || "You", created_at: new Date().toISOString(), text: chatInput.trim() }]);
-    }
-    setChatInput("");
-  }, [chatInput, userName]);
-
-  // ─── Computed ─────────────────────────────────────────────────────────
-  const inUse = courts.filter((c) => c.status === "in-use").length;
-  const totalPaddles = courts.reduce((s, c) => s + c.paddles_waiting, 0);
-  const pred = getPrediction(new Date().getDay(), Math.max(0, Math.min(14, new Date().getHours() - 6)));
-  const occ = getOcc(pred);
-  const livePct = inUse / PARK.totalCourts;
-  const liveOcc = getOcc(livePct);
-  const agreement = 1 - Math.abs(pred - livePct);
-  const agreeLabel = agreement > 0.8 ? "Strong match" : agreement > 0.6 ? "Close" : "Diverging";
-  const agreeColor = agreement > 0.8 ? C.green : agreement > 0.6 ? C.yellow : C.orange;
-  const heatData = HOURS_LABELS.map((_, hi) => getPrediction(predDay, hi));
-
-  // ─── Styles ───────────────────────────────────────────────────────────
-  const s = {
-    wrap: { fontFamily: ff, background: C.bg, minHeight: "100vh", maxWidth: 480, margin: "0 auto", position: "relative", color: C.text, paddingBottom: 90 },
-    card: { background: C.card, borderRadius: 20, border: `1px solid ${C.border}`, overflow: "hidden" },
-    pill: (on) => ({ background: on ? C.primary : C.card, color: on ? "#fff" : C.sub, border: `1.5px solid ${on ? C.primary : C.border}`, borderRadius: 100, padding: "9px 18px", fontSize: 15, fontWeight: 600, fontFamily: ff, cursor: "pointer", whiteSpace: "nowrap" }),
-    badge: (color, bg) => ({ background: bg, color, borderRadius: 100, padding: "5px 14px", fontSize: 13, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 5 }),
-    sec: { padding: "0 20px", marginBottom: 22 },
-    h2: { fontSize: 19, fontWeight: 700, fontFamily: fd, marginBottom: 14 },
-    btn: (bg, color, full) => ({ background: bg, color, border: "none", borderRadius: 16, padding: full ? "18px 24px" : "12px 20px", fontSize: full ? 17 : 15, fontWeight: 700, fontFamily: ff, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, width: full ? "100%" : "auto" }),
-    nav: { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: "rgba(255,255,255,0.96)", backdropFilter: "blur(20px)", borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-around", padding: "6px 0 28px", zIndex: 40 },
-    navBtn: (on) => ({ background: "none", border: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, color: on ? C.primary : C.muted, cursor: "pointer", padding: "6px 10px", fontSize: 11, fontWeight: on ? 700 : 500, fontFamily: ff }),
-  };
-
-  const toastEl = toast ? <div style={{ position: "fixed", top: 20, left: "50%", transform: "translateX(-50%)", background: C.text, color: "#fff", padding: "12px 28px", borderRadius: 16, fontSize: 15, fontWeight: 600, fontFamily: ff, zIndex: 200, boxShadow: "0 8px 32px rgba(0,0,0,0.2)", animation: "fadeDown 0.3s ease", textAlign: "center" }}>{toast}</div> : null;
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // NAME ENTRY SCREEN
-  // ═══════════════════════════════════════════════════════════════════════
-  if (!userName) {
-    return (
-      <div style={{ ...s.wrap, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "40px 24px", minHeight: "100vh" }}>
-        <div style={{ fontSize: 64, marginBottom: 24 }}>🏓</div>
-        <h1 style={{ fontSize: 34, fontWeight: 800, fontFamily: fd, marginBottom: 8, textAlign: "center" }}>CourtPulse</h1>
-        <p style={{ fontSize: 16, color: C.sub, textAlign: "center", marginBottom: 40, lineHeight: 1.6 }}>Live court status, paddle queue, and community chat at Marine Park</p>
-        <div style={{ width: "100%", maxWidth: 340 }}>
-          <label style={{ fontSize: 14, fontWeight: 700, color: C.sub, marginBottom: 8, display: "block" }}>What should we call you?</label>
-          <input
-            type="text"
-            placeholder="Your first name..."
-            value={nameInput}
-            onChange={(e) => setNameInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") saveName(); }}
-            autoFocus
-            style={{ width: "100%", padding: "16px 20px", borderRadius: 16, border: `1.5px solid ${C.border}`, fontSize: 18, fontFamily: ff, color: C.text, background: C.card, marginBottom: 16 }}
-          />
-          <button onClick={saveName} disabled={!nameInput.trim()} style={{ ...s.btn(nameInput.trim() ? C.primary : C.border, nameInput.trim() ? "#fff" : C.muted, true), borderRadius: 16, fontSize: 18, opacity: nameInput.trim() ? 1 : 0.5 }}>
-            Let's Go
-          </button>
-        </div>
-        <p style={{ fontSize: 12, color: C.muted, marginTop: 24, textAlign: "center" }}>Your name is shown on reports and chat messages</p>
+// ─── CourtPulse Banner ───
+const Banner = () => (
+  <div style={{
+    background: `linear-gradient(135deg, ${C.banner} 0%, #264D73 100%)`,
+    padding: "14px 18px 12px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+  }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <div style={{
+        width: 32, height: 32, borderRadius: 9,
+        background: "rgba(255,255,255,0.15)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        border: "1px solid rgba(255,255,255,0.2)",
+      }}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="6" fill="#27AE60" opacity="0.9"/>
+          <circle cx="12" cy="12" r="10" stroke="rgba(255,255,255,0.6)" strokeWidth="1.5" strokeDasharray="3,3"/>
+          <circle cx="12" cy="12" r="2" fill="white"/>
+        </svg>
       </div>
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // LOADING
-  // ═══════════════════════════════════════════════════════════════════════
-  if (loading) {
-    return (
-      <div style={{ ...s.wrap, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
-        <div style={{ fontSize: 48, marginBottom: 16, animation: "pop 1s ease infinite" }}>🏓</div>
-        <div style={{ fontSize: 16, color: C.sub }}>Loading court status...</div>
-      </div>
-    );
-  }
-
-  // ─── Report Modal ─────────────────────────────────────────────────────
-  const reportModal = reportCourt && (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
-      <div style={{ background: "#fff", borderRadius: "28px 28px 0 0", padding: "28px 24px 40px", width: "100%", maxWidth: 480, animation: "slideUp 0.3s ease" }}>
-        {showSuccess ? (
-          <div style={{ textAlign: "center", padding: "30px 0" }}>
-            <div style={{ width: 72, height: 72, borderRadius: 99, background: C.primaryLight, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", animation: "pop 0.4s ease" }}>
-              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke={C.primary} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-            </div>
-            <div style={{ fontSize: 22, fontWeight: 800, fontFamily: fd, marginBottom: 8 }}>Report Submitted!</div>
-            <div style={{ fontSize: 15, color: C.sub }}>Thanks for keeping Marine Park updated.</div>
-          </div>
-        ) : (
-          <>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 22 }}>
-              <h3 style={{ fontSize: 22, fontWeight: 800, fontFamily: fd, margin: 0 }}>Report {reportCourt.label}</h3>
-              <button onClick={() => setReportCourt(null)} style={{ background: C.borderLight, border: "none", borderRadius: 99, width: 40, height: 40, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: C.sub }}>{Ic.x}</button>
-            </div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: C.sub, marginBottom: 10 }}>Court Status</div>
-            <div style={{ display: "flex", gap: 10, marginBottom: 22 }}>
-              <button onClick={() => setReportStatus("in-use")} style={{ ...s.pill(reportStatus === "in-use"), flex: 1, textAlign: "center", padding: "14px 0" }}>🏓 In Use</button>
-              <button onClick={() => { setReportStatus("open"); setReportPaddles(0); }} style={{ ...s.pill(reportStatus === "open"), flex: 1, textAlign: "center", padding: "14px 0" }}>✅ Open</button>
-            </div>
-            {reportStatus === "in-use" && (
-              <>
-                <div style={{ fontSize: 14, fontWeight: 700, color: C.sub, marginBottom: 10 }}>Paddles Waiting</div>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 28, marginBottom: 8 }}>
-                  <button onClick={() => setReportPaddles(Math.max(0, reportPaddles - 1))} style={{ width: 56, height: 56, borderRadius: 99, border: `2px solid ${C.border}`, background: "#fff", fontSize: 26, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>−</button>
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ fontSize: 52, fontWeight: 800, fontFamily: fd, color: C.primary, lineHeight: 1 }}>{reportPaddles}</div>
-                    <div style={{ fontSize: 13, color: C.muted, marginTop: 4 }}>paddle{reportPaddles !== 1 ? "s" : ""}</div>
-                  </div>
-                  <button onClick={() => setReportPaddles(Math.min(20, reportPaddles + 1))} style={{ width: 56, height: 56, borderRadius: 99, border: `2px solid ${C.border}`, background: "#fff", fontSize: 26, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
-                </div>
-                <div style={{ display: "flex", justifyContent: "center", gap: 6, marginBottom: 22 }}>
-                  {[0,2,4,6,8].map(n => <button key={n} onClick={() => setReportPaddles(n)} style={{ ...s.pill(reportPaddles === n), minWidth: 42, padding: "8px 12px", fontSize: 14, textAlign: "center" }}>{n}</button>)}
-                </div>
-                {reportPaddles > 0 && (
-                  <div style={{ background: C.warmBg, borderRadius: 14, padding: "12px 16px", marginBottom: 20, display: "flex", alignItems: "center", gap: 10, fontSize: 14, color: C.warm, fontWeight: 600 }}>
-                    {Ic.clock} ~{reportPaddles * 12} min estimated wait
-                  </div>
-                )}
-              </>
-            )}
-            <div style={{ fontSize: 14, fontWeight: 700, color: C.sub, marginBottom: 10 }}>Add a Comment <span style={{ fontWeight: 400, color: C.muted }}>(optional)</span></div>
-            <textarea placeholder="What's it looking like? Wind, vibes, skill level..." value={reportComment} onChange={e => setReportComment(e.target.value)} rows={3}
-              style={{ width: "100%", padding: 16, borderRadius: 16, border: `1.5px solid ${C.border}`, fontSize: 15, fontFamily: ff, color: C.text, background: C.borderLight, marginBottom: 22 }} />
-            <button onClick={submitReport} style={{ ...s.btn(C.primary, "#fff", true), fontSize: 18, borderRadius: 18, boxShadow: `0 4px 20px ${C.primary}44` }}>
-              {Ic.check} Submit Report
-            </button>
-          </>
-        )}
+      <div>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 18, fontWeight: 800, color: "#fff", letterSpacing: "-0.3px", lineHeight: 1.1 }}>CourtPulse</div>
+        <div style={{ fontSize: 10, color: "rgba(255,255,255,0.55)", fontWeight: 500, fontFamily: ff, letterSpacing: "0.5px", marginTop: 1 }}>MARINE PARK</div>
       </div>
     </div>
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 5, background: "rgba(255,255,255,0.1)", padding: "5px 10px", borderRadius: 8 }}>
+        <span style={{ color: "#F0C040" }}>{Icons.Sun(14)}</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>{WEATHER.temp}°</span>
+      </div>
+    </div>
+  </div>
+);
+
+// ─── Court Map (clean — color coded only, no text labels) ───
+const CourtMap = ({ courts, onCourtTap }) => {
+  const w = 380;
+  const h = 250;
+  const cW = 76;
+  const cH = 82;
+  const gap = 10;
+  const startX = (w - (cW * 4 + gap * 3)) / 2;
+  const topY = 22;
+  const botY = topY + cH + 30;
+
+  const positions = [
+    { id: 1, row: 0, col: 0 }, { id: 2, row: 0, col: 1 }, { id: 3, row: 0, col: 2 }, { id: 4, row: 0, col: 3 },
+    { id: 5, row: 1, col: 0 }, { id: 6, row: 1, col: 1 }, { id: 7, row: 1, col: 2 }, { id: 8, row: 1, col: 3 },
+  ];
+
+  return (
+    <svg width="100%" viewBox={`0 0 ${w} ${h}`} style={{ display: "block" }}>
+      <rect x="0" y="0" width={w} height={h} rx="14" fill="#2D5A27" opacity="0.08" />
+      <rect x="4" y="4" width={w - 8} height={h - 8} rx="12" fill="#3A7233" opacity="0.04" />
+
+      {/* Center divider */}
+      <line x1={startX - 6} y1={topY + cH + 15} x2={startX + cW * 4 + gap * 3 + 6} y2={topY + cH + 15}
+        stroke="#5A6270" strokeWidth="1.5" strokeDasharray="8,5" opacity="0.18" />
+      <text x={w / 2} y={topY + cH + 12} textAnchor="middle" fontSize="7.5" fill="#5A6270" fontFamily={ff} opacity="0.45" fontWeight="600">NET DIVIDERS</text>
+
+      {/* Entrance */}
+      <text x={w / 2} y={h - 5} textAnchor="middle" fontSize="8" fill="#5A6270" fontFamily={ff} opacity="0.45" fontWeight="600">ENTRANCE</text>
+      <path d={`M${w / 2 - 18} ${h - 13} L${w / 2} ${h - 9} L${w / 2 + 18} ${h - 13}`} stroke="#5A6270" strokeWidth="1" fill="none" opacity="0.2" />
+
+      {positions.map(pos => {
+        const court = courts.find(c => c.id === pos.id);
+        const x = startX + pos.col * (cW + gap);
+        const y = pos.row === 0 ? topY : botY;
+        const cc = COURT_COLOR(court.stacks);
+        const hasCond = court.conditions.length > 0;
+        const typeLabel = court.type === "beginner" ? "BEGINNER" : court.type === "challenge" ? "CHALLENGE" : null;
+        const typeColor = court.type === "beginner" ? "#6C63FF" : court.type === "challenge" ? "#D4540E" : null;
+
+        return (
+          <g key={court.id} onClick={() => onCourtTap(court.id)} style={{ cursor: "pointer" }}>
+            <rect x={x} y={y} width={cW} height={cH} rx="7" fill={cc.fill} stroke={cc.stroke} strokeWidth="2.5" />
+            {/* Inner court lines */}
+            <line x1={x + 5} y1={y + cH / 2} x2={x + cW - 5} y2={y + cH / 2} stroke={cc.stroke} strokeWidth="0.7" opacity="0.3" />
+            <rect x={x + cW * 0.18} y={y + cH * 0.18} width={cW * 0.64} height={cH * 0.64} rx="3" fill="none" stroke={cc.stroke} strokeWidth="0.5" opacity="0.2" />
+
+            {/* Court number */}
+            <text x={x + cW / 2} y={y + cH / 2 + (typeLabel ? 0 : 5)} textAnchor="middle" fontSize="16" fontWeight="800" fill={cc.stroke} fontFamily={ff}>{court.id}</text>
+
+            {/* Court type label for beginner/challenge */}
+            {typeLabel && (
+              <g>
+                <rect x={x + 8} y={y + cH / 2 + 7} width={cW - 16} height={15} rx="4" fill={typeColor} opacity="0.15" />
+                <text x={x + cW / 2} y={y + cH / 2 + 18} textAnchor="middle" fontSize="7.5" fontWeight="700" fill={typeColor} fontFamily={ff} opacity="0.9">{typeLabel}</text>
+              </g>
+            )}
+
+            {/* Condition dot */}
+            {hasCond && <circle cx={x + cW - 9} cy={y + 9} r="4.5" fill={C.yellow} stroke="#fff" strokeWidth="1.5" />}
+          </g>
+        );
+      })}
+    </svg>
   );
+};
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // HOME
-  // ═══════════════════════════════════════════════════════════════════════
-  const homeScreen = (
-    <>
-      <div style={{ padding: "22px 20px 0" }}>
-        <div style={{ fontSize: 14, color: C.sub, marginBottom: 2 }}>
-          {new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 17 ? "Good afternoon" : "Good evening"}, {userName}
-        </div>
-        <h1 style={{ fontSize: 30, fontWeight: 800, fontFamily: fd, letterSpacing: "-0.3px", margin: 0 }}>Marine Park 🏓</h1>
-        <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 6, fontSize: 13, color: C.sub }}>{Ic.pin} {PARK.address}</div>
-        {!isConnected() && <div style={{ marginTop: 10, background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 10, padding: "8px 14px", fontSize: 12, color: "#92400e", fontWeight: 600 }}>Demo Mode — Connect Supabase to go live</div>}
-      </div>
+// ─── AI Prediction Timeline (day-of-week navigable) ───
+const PredictionTimeline = () => {
+  const todayIdx = (new Date().getDay() + 6) % 7; // Mon=0 ... Sun=6
+  const [selectedDay, setSelectedDay] = useState(todayIdx);
 
-      <div style={{ ...s.sec, marginTop: 20 }}>
-        <div style={{ background: `linear-gradient(135deg, ${C.primary}, ${C.primaryDark})`, borderRadius: 22, padding: "22px 22px 18px", color: "#fff" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 16 }}>
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 600, opacity: 0.75, textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>Right Now</div>
-              <div style={{ fontSize: 34, fontWeight: 800, fontFamily: fd, lineHeight: 1 }}>{inUse}/{PARK.totalCourts} <span style={{ fontSize: 16, fontWeight: 500, opacity: 0.8 }}>courts in use</span></div>
-            </div>
-            <div style={{ background: "rgba(255,255,255,0.2)", borderRadius: 14, padding: "10px 16px", textAlign: "center" }}>
-              <div style={{ fontSize: 24, fontWeight: 800, fontFamily: fd }}>{totalPaddles}</div>
-              <div style={{ fontSize: 11, opacity: 0.8 }}>paddles waiting</div>
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 10 }}>
-            {courts.map(c => (
-              <div key={c.id} onClick={() => { setTab("courts"); }} style={{ flex: 1, background: c.status === "open" ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.2)", borderRadius: 12, padding: "10px 0", textAlign: "center", cursor: "pointer" }}>
-                <div style={{ fontSize: 11, fontWeight: 600, opacity: 0.8 }}>C{c.court_number}</div>
-                <div style={{ fontSize: 16, fontWeight: 800, marginTop: 2 }}>{c.status === "open" ? "✅" : c.paddles_waiting}</div>
-                <div style={{ fontSize: 9, opacity: 0.7, marginTop: 1 }}>{c.status === "open" ? "Open" : c.paddles_waiting === 0 ? "No wait" : `${c.paddles_waiting} pad`}</div>
-              </div>
-            ))}
-          </div>
-        </div>
+  const dayKey = DAYS_OF_WEEK[selectedDay];
+  const predictions = AI_PREDICTIONS_BY_DAY[dayKey];
+  const isToday = selectedDay === todayIdx;
+
+  const now = new Date();
+  const currentHour = now.getHours();
+  const nowIdx = isToday ? predictions.findIndex((p) => {
+    const h = parseInt(p.hour);
+    const isPM = p.hour.includes("P");
+    const h24 = isPM && h !== 12 ? h + 12 : (!isPM && h === 12 ? 0 : h);
+    return h24 >= currentHour;
+  }) : -1;
+
+  return (
+    <div style={{ background: C.card, borderRadius: 14, padding: "14px 14px 12px", border: `1px solid ${C.border}`, margin: "12px 16px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 10 }}>
+        <span style={{ color: C.primary }}>{Icons.Brain(15)}</span>
+        <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>AI Predicted Busyness</span>
       </div>
 
-      <div style={s.sec}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-          <div style={{ background: C.blueBg, border: `1px solid ${C.blueLight}`, borderRadius: 18, padding: "16px 14px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 10 }}><span style={{ fontSize: 15 }}>🤖</span><span style={{ fontSize: 12, fontWeight: 700, color: C.blue }}>AI Prediction</span></div>
-            <div style={{ fontSize: 28, fontWeight: 800, fontFamily: fd, color: occ.color }}>{occ.emoji} {occ.label}</div>
-            <div style={{ fontSize: 11, color: C.sub, marginTop: 6 }}>Based on historical patterns</div>
-          </div>
-          <div style={{ background: C.purpleBg, border: `1px solid ${C.purpleLight}`, borderRadius: 18, padding: "16px 14px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 10 }}><span style={{ fontSize: 15 }}>👥</span><span style={{ fontSize: 12, fontWeight: 700, color: C.purple }}>Player Reports</span></div>
-            <div style={{ fontSize: 28, fontWeight: 800, fontFamily: fd, color: liveOcc.color }}>{liveOcc.emoji} {liveOcc.label}</div>
-            <div style={{ fontSize: 11, color: C.sub, marginTop: 6 }}>{inUse}/{PARK.totalCourts} courts · {totalPaddles} paddles</div>
-          </div>
-        </div>
-        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "11px 16px", display: "flex", alignItems: "center", gap: 12 }}>
-          {Ic.shield}<span style={{ fontSize: 13, fontWeight: 700 }}>Trust</span>
-          <div style={{ flex: 1, height: 8, background: C.borderLight, borderRadius: 99, overflow: "hidden" }}><div style={{ height: "100%", width: `${agreement * 100}%`, background: agreeColor, borderRadius: 99 }} /></div>
-          <span style={{ fontSize: 12, fontWeight: 700, color: agreeColor }}>{agreeLabel}</span>
-        </div>
-      </div>
-
-      <div style={s.sec}>
-        <div style={{ ...s.card, padding: 20 }}>
-          <div style={s.h2}>📊 Predicted Busyness</div>
-          <div style={{ display: "flex", gap: 3, marginBottom: 16 }}>
-            {DAYS.map((d, i) => (
-              <button key={d} onClick={() => setPredDay(i)} style={{ flex: 1, background: predDay === i ? C.primary : "transparent", color: predDay === i ? "#fff" : i === new Date().getDay() ? C.primary : C.sub, border: i === new Date().getDay() && predDay !== i ? `2px solid ${C.primary}` : "2px solid transparent", borderRadius: 10, padding: "8px 0", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: ff, textAlign: "center" }}>{d}</button>
-            ))}
-          </div>
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 100, marginBottom: 6 }}>
-            {heatData.map((v, i) => {
-              const o = getOcc(v); const nowH = new Date().getHours() - 6; const isNow = predDay === new Date().getDay() && i === Math.max(0, Math.min(14, nowH));
-              return (<div key={i} style={{ flex: 1, position: "relative", display: "flex", flexDirection: "column", alignItems: "center" }}>
-                {isNow && <div style={{ position: "absolute", top: -12, fontSize: 8, fontWeight: 800, color: C.primary }}>NOW</div>}
-                <div style={{ width: "100%", borderRadius: 5, height: Math.max(5, v * 90), background: isNow ? C.primary : o.color, opacity: isNow ? 1 : 0.6 }} />
-              </div>);
-            })}
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: C.muted }}><span>6 AM</span><span>12 PM</span><span>8 PM</span></div>
-        </div>
-      </div>
-
-      <div style={s.sec}>
-        <div style={{ ...s.card, padding: 20 }}>
-          <div style={{ ...s.h2, display: "flex", alignItems: "center", gap: 8 }}>{Ic.cal} Weekly Schedule</div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {SCHEDULED.map((ev, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", background: C.primaryGhost, borderRadius: 14 }}>
-                <div style={{ minWidth: 38, fontWeight: 800, fontSize: 13, color: C.primary, textAlign: "center" }}>{ev.day}</div>
-                <div style={{ flex: 1 }}><div style={{ fontSize: 15, fontWeight: 700 }}>{ev.name}</div><div style={{ fontSize: 13, color: C.sub }}>{ev.time}</div></div>
-                <span style={{ fontSize: 11, fontWeight: 700, padding: "4px 12px", borderRadius: 8, background: ev.type === "league" ? C.purpleLight : C.primaryLight, color: ev.type === "league" ? C.purple : C.primaryDark }}>{ev.type === "league" ? "League" : "Open"}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </>
-  );
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // COURTS TAB
-  // ═══════════════════════════════════════════════════════════════════════
-  const courtsScreen = (
-    <>
-      <div style={{ padding: "22px 20px 0" }}>
-        <h1 style={{ fontSize: 26, fontWeight: 800, fontFamily: fd, margin: 0 }}>Court Status</h1>
-        <div style={{ fontSize: 14, color: C.sub, marginTop: 4 }}>Tap a court to update its status</div>
-      </div>
-      <div style={{ ...s.sec, marginTop: 18 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {courts.map((c, i) => {
-            const isOpen = c.status === "open"; const waitMin = c.paddles_waiting * 12;
-            return (
-              <button key={c.id} onClick={() => openReport(c)} style={{ ...s.card, display: "flex", alignItems: "center", gap: 14, padding: "18px 18px", cursor: "pointer", textAlign: "left", width: "100%", animation: `fadeUp ${0.12 + i * 0.05}s ease both` }}>
-                <div style={{ width: 56, height: 56, borderRadius: 16, background: isOpen ? C.primaryLight : c.paddles_waiting > 4 ? "#fef2f2" : c.paddles_waiting > 0 ? "#fefce8" : C.primaryGhost, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: C.muted }}>C{c.court_number}</div>
-                  <div style={{ fontSize: 22 }}>{isOpen ? "✅" : "🏓"}</div>
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 17, fontWeight: 800, fontFamily: fd, marginBottom: 4 }}>{c.label}</div>
-                  <div style={{ fontSize: 14, color: isOpen ? C.green : C.sub, fontWeight: 600, marginBottom: 3 }}>
-                    {isOpen ? "Open — walk right on" : c.paddles_waiting === 0 ? "In use · no paddles waiting" : `In use · ${c.paddles_waiting} paddle${c.paddles_waiting !== 1 ? "s" : ""} waiting`}
-                  </div>
-                  <div style={{ fontSize: 12, color: C.muted }}>{c.reporter} · {c.lastReport}</div>
-                </div>
-                <div style={{ textAlign: "right", flexShrink: 0 }}>
-                  {isOpen ? <div style={s.badge(C.green, "#f0fdf4")}>🟢 Open</div>
-                    : c.paddles_waiting === 0 ? <div style={s.badge("#ca8a04", "#fefce8")}>🟡 No wait</div>
-                    : <div style={s.badge(c.paddles_waiting > 4 ? C.red : C.orange, c.paddles_waiting > 4 ? "#fef2f2" : "#fff7ed")}>{c.paddles_waiting > 4 ? "🔴" : "🟠"} ~{waitMin}m</div>}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </>
-  );
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // FEED TAB
-  // ═══════════════════════════════════════════════════════════════════════
-  const feedScreen = (
-    <>
-      <div style={{ padding: "22px 20px 0" }}>
-        <h1 style={{ fontSize: 26, fontWeight: 800, fontFamily: fd, margin: 0 }}>Live Feed</h1>
-        <div style={{ fontSize: 14, color: C.sub, marginTop: 4 }}>What players are saying at Marine Park</div>
-      </div>
-      <div style={{ ...s.sec, marginTop: 18 }}>
-        <div style={{ ...s.card, padding: 16 }}>
-          <textarea placeholder="How are the courts looking? Share conditions, wait times, or tips..." value={feedInput} onChange={e => setFeedInput(e.target.value)} rows={3}
-            style={{ width: "100%", padding: 14, borderRadius: 14, border: `1.5px solid ${C.border}`, fontSize: 15, fontFamily: ff, color: C.text, background: C.borderLight, marginBottom: 12 }} />
-          <button onClick={submitFeedComment} disabled={!feedInput.trim()} style={{ ...s.btn(feedInput.trim() ? C.primary : C.border, feedInput.trim() ? "#fff" : C.muted, true), borderRadius: 14, fontSize: 16, opacity: feedInput.trim() ? 1 : 0.5 }}>Post Update</button>
-        </div>
-      </div>
-      <div style={s.sec}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: C.sub, marginBottom: 10 }}>Quick Status</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          {[
-            { l: "🟢 Courts Open", bg: "#f0fdf4", br: "#bbf7d0", c: "#16a34a", t: "Courts are open, not much wait!" },
-            { l: "🟡 Moderate", bg: "#fefce8", br: "#fef08a", c: "#ca8a04", t: "Moderate activity, some courts available." },
-            { l: "🟠 Getting Busy", bg: "#fff7ed", br: "#fed7aa", c: "#ea580c", t: "Getting busy, paddles are stacking up." },
-            { l: "🔴 Packed", bg: "#fef2f2", br: "#fecaca", c: "#dc2626", t: "Packed — long waits at most courts." },
-          ].map(o => (
-            <button key={o.l} onClick={() => submitQuickStatus(o.t)} style={{ background: o.bg, border: `2px solid ${o.br}`, borderRadius: 16, padding: "15px 12px", fontSize: 15, fontWeight: 700, color: o.c, cursor: "pointer", fontFamily: ff, textAlign: "center" }}>{o.l}</button>
-          ))}
-        </div>
-      </div>
-      <div style={s.sec}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {feed.map((r, i) => (
-            <div key={r.id} style={{ ...s.card, padding: "16px 18px", animation: `fadeUp ${0.1 + i * 0.04}s ease both` }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <div style={{ width: 36, height: 36, borderRadius: 99, background: C.primaryLight, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, color: C.primary }}>{(r.user_name || "?")[0]}</div>
-                  <span style={{ fontSize: 15, fontWeight: 700 }}>{r.user_name}</span>
-                </div>
-                <span style={{ fontSize: 12, color: C.muted }}>{timeAgo(r.created_at)}</span>
-              </div>
-              <div style={{ fontSize: 15, color: C.text, lineHeight: 1.55, paddingLeft: 46 }}>{r.text}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </>
-  );
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // CHAT TAB
-  // ═══════════════════════════════════════════════════════════════════════
-  const chatScreen = (
-    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 80px)" }}>
-      <div style={{ padding: "22px 20px 12px", borderBottom: `1px solid ${C.border}`, background: C.bg }}>
-        <h1 style={{ fontSize: 22, fontWeight: 800, fontFamily: fd, margin: 0 }}>Marine Park Chat 💬</h1>
-        <div style={{ fontSize: 13, color: C.sub, marginTop: 3 }}>{chatMsgs.length} messages</div>
-      </div>
-      <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px", display: "flex", flexDirection: "column", gap: 10 }}>
-        {chatMsgs.map(m => {
-          const isSelf = m.user_name === userName;
+      {/* Day-of-week selector */}
+      <div style={{ display: "flex", gap: 4, marginBottom: 14 }}>
+        {DAYS_OF_WEEK.map((d, i) => {
+          const active = i === selectedDay;
+          const today = i === todayIdx;
           return (
-            <div key={m.id} style={{ display: "flex", justifyContent: isSelf ? "flex-end" : "flex-start" }}>
-              <div style={{ maxWidth: "80%" }}>
-                {!isSelf && <div style={{ fontSize: 12, fontWeight: 700, color: C.primary, marginBottom: 4, paddingLeft: 4 }}>{m.user_name}</div>}
-                <div style={{ background: isSelf ? C.primary : C.card, color: isSelf ? "#fff" : C.text, borderRadius: isSelf ? "20px 20px 6px 20px" : "20px 20px 20px 6px", padding: "12px 18px", fontSize: 15, lineHeight: 1.5, fontFamily: ff, border: isSelf ? "none" : `1px solid ${C.border}`, boxShadow: isSelf ? `0 2px 12px ${C.primary}33` : "none" }}>
-                  {m.text}
-                </div>
-                <div style={{ fontSize: 11, color: C.muted, marginTop: 4, textAlign: isSelf ? "right" : "left", padding: "0 4px" }}>{formatTime(m.created_at)}</div>
-              </div>
+            <button key={d} onClick={() => setSelectedDay(i)}
+              style={{
+                flex: 1, padding: "7px 0", borderRadius: 8,
+                border: active ? `2px solid ${C.primary}` : today ? `1.5px solid ${C.primary}44` : `1px solid ${C.border}`,
+                background: active ? C.primaryLight : C.card,
+                cursor: "pointer", fontFamily: ff,
+                display: "flex", flexDirection: "column", alignItems: "center", gap: 1,
+              }}>
+              <span style={{ fontSize: 11, fontWeight: active ? 800 : 600, color: active ? C.primary : today ? C.primary : C.sub }}>{d}</span>
+              {today && <div style={{ width: 4, height: 4, borderRadius: 2, background: C.primary, marginTop: 1 }} />}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Bar chart */}
+      <div style={{ display: "flex", gap: 2, alignItems: "flex-end", height: 56, marginBottom: 4 }}>
+        {predictions.map((p, i) => {
+          const barH = p.level === 0 ? 8 : 12 + (p.level * 11);
+          const isNow = i === nowIdx;
+          return (
+            <div key={p.hour} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+              <div style={{
+                width: "100%",
+                height: barH,
+                borderRadius: 3,
+                background: PREDICTION_COLORS[p.level],
+                opacity: isNow ? 1 : 0.55,
+                border: isNow ? `2px solid ${C.text}` : "none",
+                boxSizing: "border-box",
+                transition: "all 0.2s",
+              }} />
             </div>
           );
         })}
-        <div ref={chatEndRef} />
       </div>
-      <div style={{ padding: "12px 20px 16px", borderTop: `1px solid ${C.border}`, background: C.bg, display: "flex", gap: 10 }}>
-        <input type="text" placeholder="Message Marine Park..." value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") sendChat(); }}
-          style={{ flex: 1, padding: "14px 18px", borderRadius: 20, border: `1.5px solid ${C.border}`, fontSize: 15, fontFamily: ff, color: C.text, background: C.card }} />
-        <button onClick={sendChat} disabled={!chatInput.trim()}
-          style={{ width: 50, height: 50, borderRadius: 99, background: chatInput.trim() ? C.primary : C.border, border: "none", cursor: chatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: chatInput.trim() ? "#fff" : C.muted, flexShrink: 0 }}>
-          {Ic.send}
-        </button>
+      <div style={{ display: "flex", gap: 2 }}>
+        {predictions.map((p, i) => (
+          <div key={p.hour + "l"} style={{ flex: 1, textAlign: "center" }}>
+            <span style={{ fontSize: 8, color: C.muted, fontWeight: 500 }}>{i % 2 === 0 ? p.hour : ""}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 10 }}>
+        {[
+          { label: "Empty", color: PREDICTION_COLORS[0] },
+          { label: "Light", color: PREDICTION_COLORS[1] },
+          { label: "Moderate", color: PREDICTION_COLORS[2] },
+          { label: "Busy", color: PREDICTION_COLORS[3] },
+          { label: "Packed", color: PREDICTION_COLORS[4] },
+        ].map(l => (
+          <div key={l.label} style={{ display: "flex", alignItems: "center", gap: 3 }}>
+            <div style={{ width: 7, height: 7, borderRadius: 2, background: l.color }} />
+            <span style={{ fontSize: 9, color: C.muted, fontWeight: 500 }}>{l.label}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
+};
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // RENDER
-  // ═══════════════════════════════════════════════════════════════════════
+// ─── Stack Stepper (+/-) ───
+const StackStepper = ({ value, onChange }) => {
+  const st = STATUS_MAP(value);
   return (
-    <div style={s.wrap}>
-      {toastEl}
-      {reportModal}
-      {tab === "home" && homeScreen}
-      {tab === "courts" && courtsScreen}
-      {tab === "feed" && feedScreen}
-      {tab === "chat" && chatScreen}
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 20, padding: "12px 0" }}>
+      <button
+        onClick={() => onChange(Math.max(0, value - 1))}
+        disabled={value === 0}
+        style={{
+          width: 52, height: 52, borderRadius: 14,
+          background: value === 0 ? C.bg : C.card,
+          border: `2px solid ${value === 0 ? C.border : C.primary}`,
+          cursor: value === 0 ? "default" : "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          color: value === 0 ? C.muted : C.primary,
+          fontFamily: ff,
+        }}
+      >{Icons.Minus(22)}</button>
+      <div style={{ textAlign: "center", minWidth: 90 }}>
+        <div style={{ fontSize: 40, fontWeight: 800, color: st.color, lineHeight: 1, fontFamily: ff }}>{value}</div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: st.color, marginTop: 4 }}>{st.label}</div>
+      </div>
+      <button
+        onClick={() => onChange(value + 1)}
+        style={{
+          width: 52, height: 52, borderRadius: 14,
+          background: C.card,
+          border: `2px solid ${C.primary}`,
+          cursor: "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          color: C.primary,
+          fontFamily: ff,
+        }}
+      >{Icons.Plus(22)}</button>
+    </div>
+  );
+};
 
-      <div style={s.nav}>
-        <button onClick={() => setTab("home")} style={s.navBtn(tab === "home")}>{Ic.home}<span>Home</span></button>
-        <button onClick={() => setTab("courts")} style={s.navBtn(tab === "courts")}>{Ic.grid}<span>Courts</span></button>
-        <button onClick={() => setTab("courts")} style={s.navBtn(false)}>
-          <div style={{ background: C.primary, width: 52, height: 52, borderRadius: 99, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", marginTop: -22, boxShadow: `0 4px 20px ${C.primary}55` }}>{Ic.report}</div>
-          <span style={{ color: C.primary, fontWeight: 700 }}>Report</span>
-        </button>
-        <button onClick={() => setTab("feed")} style={s.navBtn(tab === "feed")}>{Ic.feed}<span>Feed</span></button>
-        <button onClick={() => setTab("chat")} style={s.navBtn(tab === "chat")}>{Ic.chat}<span>Chat</span></button>
+// ─── Sign Up Screen ───
+const SignUpScreen = ({ onJoin }) => {
+  const [name, setName] = useState("");
+  const [contact, setContact] = useState("");
+
+  const inputStyle = {
+    width: "100%", padding: "14px 16px", borderRadius: 12,
+    border: `1.5px solid ${C.border}`, fontSize: 15, fontFamily: ff,
+    color: C.text, background: C.card, outline: "none", boxSizing: "border-box",
+  };
+
+  return (
+    <div style={{
+      width: "100%", maxWidth: 430, margin: "0 auto", height: "100vh", maxHeight: 932,
+      background: C.bg, fontFamily: ff, display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center", padding: 24, boxSizing: "border-box",
+    }}>
+      <FontLoader />
+      <div style={{
+        width: 72, height: 72, borderRadius: 20,
+        background: `linear-gradient(135deg, ${C.banner} 0%, #264D73 100%)`,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        marginBottom: 20, boxShadow: "0 8px 24px rgba(26,58,92,0.25)",
+      }}>
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="6" fill="#27AE60" opacity="0.9"/>
+          <circle cx="12" cy="12" r="10" stroke="rgba(255,255,255,0.6)" strokeWidth="1.5" strokeDasharray="3,3"/>
+          <circle cx="12" cy="12" r="2" fill="white"/>
+        </svg>
+      </div>
+      <div style={{ fontFamily: "'Fraunces', serif", fontSize: 28, fontWeight: 900, color: C.text, letterSpacing: "-0.5px", marginBottom: 4 }}>CourtPulse</div>
+      <p style={{ fontSize: 15, color: C.sub, marginBottom: 32, textAlign: "center", lineHeight: 1.4 }}>
+        Real-time court status for<br/>Marine Park pickleball
+      </p>
+
+      <div style={{ width: "100%", maxWidth: 320, display: "flex", flexDirection: "column", gap: 12, marginBottom: 24 }}>
+        <div>
+          <label style={{ fontSize: 13, fontWeight: 600, color: C.text, display: "block", marginBottom: 6, paddingLeft: 2 }}>Your Name</label>
+          <input type="text" placeholder="First name & last initial" value={name} onChange={e => setName(e.target.value)} style={inputStyle} />
+        </div>
+        <div>
+          <label style={{ fontSize: 13, fontWeight: 600, color: C.text, display: "block", marginBottom: 6, paddingLeft: 2 }}>Phone or Email</label>
+          <input type="text" placeholder="For notifications (optional)" value={contact} onChange={e => setContact(e.target.value)} style={inputStyle} />
+        </div>
+      </div>
+
+      <button
+        onClick={() => { if (name.trim()) onJoin(name.trim()); }}
+        disabled={!name.trim()}
+        style={{
+          width: "100%", maxWidth: 320, padding: "16px",
+          borderRadius: 14, border: "none",
+          background: name.trim() ? `linear-gradient(135deg, ${C.banner} 0%, #264D73 100%)` : C.border,
+          color: name.trim() ? "#fff" : C.muted,
+          fontSize: 17, fontWeight: 700, fontFamily: ff,
+          cursor: name.trim() ? "pointer" : "default",
+          boxShadow: name.trim() ? "0 4px 16px rgba(26,58,92,0.3)" : "none",
+        }}
+      >
+        Join Marine Park
+      </button>
+
+      <p style={{ fontSize: 12, color: C.muted, marginTop: 16, textAlign: "center", lineHeight: 1.4 }}>
+        By joining, you agree to keep reports<br/>accurate and respect other players.
+      </p>
+    </div>
+  );
+};
+
+
+// ─── Main App ───
+export default function CourtPulse() {
+  const [loggedIn, setLoggedIn] = useState(false);
+  const [userName, setUserName] = useState("AJ");
+  const [tab, setTab] = useState("home");
+  const [courts, setCourts] = useState(INIT_COURTS);
+  const [mainChat, setMainChat] = useState(INIT_MAIN_CHAT);
+  const [courtChats, setCourtChats] = useState(() => {
+    const obj = {};
+    INIT_COURTS.forEach(c => { obj[c.id] = makeCourtChat(c.id); });
+    return obj;
+  });
+  const [chatInput, setChatInput] = useState("");
+  const [reports, setReports] = useState(INIT_REPORTS);
+  const [selectedCourt, setSelectedCourt] = useState(null);
+  const [courtChatInput, setCourtChatInput] = useState("");
+  const [showCourtReport, setShowCourtReport] = useState(false);
+  const [reportStacks, setReportStacks] = useState(0);
+
+  const [reportConditions, setReportConditions] = useState([]);
+  const [parkReportLevel, setParkReportLevel] = useState(null);
+  const [parkReportConditions, setParkReportConditions] = useState([]);
+  const [parkReportText, setParkReportText] = useState("");
+  const [reportSuccess, setReportSuccess] = useState(false);
+
+  const chatEndRef = useRef(null);
+  const courtChatEndRef = useRef(null);
+
+  useEffect(() => {
+    if (tab === "chat" && chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+  }, [tab, mainChat]);
+
+  useEffect(() => {
+    if (selectedCourt && courtChatEndRef.current) courtChatEndRef.current.scrollIntoView({ behavior: "smooth" });
+  }, [selectedCourt, courtChats]);
+
+  const sendMainChat = useCallback(() => {
+    if (!chatInput.trim()) return;
+    const time = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    setMainChat(p => [...p, { id: Date.now(), name: "You", text: chatInput.trim(), time, self: true }]);
+    setChatInput("");
+  }, [chatInput]);
+
+  const sendCourtChat = useCallback(() => {
+    if (!courtChatInput.trim() || !selectedCourt) return;
+    const time = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    setCourtChats(p => ({
+      ...p,
+      [selectedCourt]: [...(p[selectedCourt] || []), { id: Date.now(), name: "You", text: courtChatInput.trim(), time, self: true }]
+    }));
+    setCourtChatInput("");
+  }, [courtChatInput, selectedCourt]);
+
+  const submitCourtReport = useCallback(() => {
+    if (!selectedCourt) return;
+    setCourts(p => p.map(c => c.id === selectedCourt
+      ? { ...c, stacks: reportStacks, conditions: reportConditions, lastReport: "Just now", reporter: userName }
+      : c
+    ));
+    setReportSuccess(true);
+    setTimeout(() => { setShowCourtReport(false); setReportStacks(0); setReportConditions([]); setReportSuccess(false); }, 900);
+  }, [reportStacks, reportConditions, selectedCourt, userName]);
+
+  const submitParkReport = useCallback(() => {
+    if (!parkReportLevel) return;
+    const time = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    setReports(p => [{ id: Date.now(), user: userName, time, level: parkReportLevel, conditions: parkReportConditions, text: parkReportText }, ...p]);
+    setReportSuccess(true);
+    setTimeout(() => { setParkReportLevel(null); setParkReportConditions([]); setParkReportText(""); setReportSuccess(false); }, 1200);
+  }, [parkReportLevel, parkReportConditions, parkReportText, userName]);
+
+  const activeConditions = [...new Set(courts.flatMap(c => c.conditions))];
+
+  // ─── Sign Up Gate ───
+  if (!loggedIn) {
+    return <SignUpScreen onJoin={(name) => { setUserName(name); setLoggedIn(true); }} />;
+  }
+
+  // ─── Court Detail View ───
+  if (selectedCourt) {
+    const court = courts.find(c => c.id === selectedCourt);
+    const st = STATUS_MAP(court.stacks);
+    const typeInfo = COURT_TYPES[court.type];
+    const msgs = courtChats[selectedCourt] || [];
+
+    return (
+      <div style={{ width: "100%", maxWidth: 430, margin: "0 auto", height: "100vh", maxHeight: 932, background: C.bg, fontFamily: ff, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <FontLoader />
+        {/* Header */}
+        <div style={{ padding: "14px 16px 12px", background: C.card, borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={() => { setSelectedCourt(null); setShowCourtReport(false); setReportStacks(0); setReportConditions([]); }} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: C.primary, display: "flex" }}>{Icons.Back()}</button>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 17, fontWeight: 700, color: C.text }}>Court {court.id}</div>
+            <div style={{ fontSize: 12, color: typeInfo.color, fontWeight: 600 }}>{typeInfo.label} · {typeInfo.sub}</div>
+          </div>
+          <div style={{ background: st.bg, color: st.color, fontSize: 13, fontWeight: 700, padding: "5px 14px", borderRadius: 20, border: `1.5px solid ${st.color}33` }}>{st.label}</div>
+        </div>
+
+        {court.conditions.length > 0 && (
+          <div style={{ padding: "8px 16px", background: C.yellowLight, display: "flex", gap: 8, alignItems: "center", borderBottom: `1px solid ${C.border}` }}>
+            {Icons.Alert(13)}<span style={{ fontSize: 13, color: C.sub, fontWeight: 500 }}>{court.conditions.map(c => CONDITION_OPTIONS.find(o => o.key === c)?.label).join(", ")}</span>
+            <span style={{ fontSize: 11, color: C.muted, marginLeft: "auto" }}>{court.lastReport}</span>
+          </div>
+        )}
+
+        {/* Toggle */}
+        <div style={{ display: "flex", padding: "10px 16px", gap: 8, background: C.card, borderBottom: `1px solid ${C.border}` }}>
+          <button onClick={() => setShowCourtReport(false)} style={{ flex: 1, padding: "10px", borderRadius: 10, border: "none", background: !showCourtReport ? C.primary : C.bg, color: !showCourtReport ? "#fff" : C.sub, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: ff }}>Chat</button>
+          <button onClick={() => setShowCourtReport(true)} style={{ flex: 1, padding: "10px", borderRadius: 10, border: "none", background: showCourtReport ? C.primary : C.bg, color: showCourtReport ? "#fff" : C.sub, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: ff }}>Report</button>
+        </div>
+
+        {!showCourtReport ? (
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <div style={{ flex: 1, overflowY: "auto", padding: "16px 16px 8px" }}>
+              <div style={{ textAlign: "center", marginBottom: 16 }}>
+                <span style={{ fontSize: 12, color: C.muted, background: C.bg, padding: "4px 12px", borderRadius: 16 }}>Court {court.id} · {typeInfo.label}</span>
+              </div>
+              {msgs.map(m => (
+                <div key={m.id} style={{ display: "flex", justifyContent: m.self ? "flex-end" : "flex-start", marginBottom: 10 }}>
+                  <div style={{ maxWidth: "78%" }}>
+                    {!m.self && <div style={{ fontSize: 11, fontWeight: 700, color: C.primary, marginBottom: 3, paddingLeft: 10 }}>{m.name}</div>}
+                    <div style={{ background: m.self ? C.chatSelf : C.chatOther, color: m.self ? "#fff" : C.text, borderRadius: m.self ? "18px 18px 4px 18px" : "18px 18px 18px 4px", padding: "10px 15px", fontSize: 15, lineHeight: 1.45, fontFamily: ff, border: m.self ? "none" : `1px solid ${C.border}` }}>{m.text}</div>
+                    <div style={{ fontSize: 10, color: C.muted, marginTop: 2, textAlign: m.self ? "right" : "left", padding: "0 10px" }}>{m.time}</div>
+                  </div>
+                </div>
+              ))}
+              <div ref={courtChatEndRef} />
+            </div>
+            <div style={{ padding: "10px 16px 14px", borderTop: `1px solid ${C.border}`, background: C.card, display: "flex", gap: 10 }}>
+              <input type="text" placeholder={`Message Court ${court.id}...`} value={courtChatInput} onChange={e => setCourtChatInput(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") sendCourtChat(); }}
+                style={{ flex: 1, padding: "12px 16px", borderRadius: 22, border: `1.5px solid ${C.border}`, fontSize: 15, fontFamily: ff, color: C.text, background: C.bg, outline: "none" }} />
+              <button onClick={sendCourtChat} disabled={!courtChatInput.trim()}
+                style={{ width: 44, height: 44, borderRadius: 22, background: courtChatInput.trim() ? C.primary : C.border, border: "none", cursor: courtChatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>{Icons.Send(18)}</button>
+            </div>
+          </div>
+        ) : (
+          <div style={{ flex: 1, overflowY: "auto", padding: "20px 16px" }}>
+            {reportSuccess ? (
+              <div style={{ textAlign: "center", paddingTop: 60 }}>
+                <div style={{ width: 64, height: 64, borderRadius: 32, background: C.greenLight, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px", color: C.green, fontSize: 28 }}>&#10003;</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: C.green }}>Court {court.id} Updated</div>
+              </div>
+            ) : (
+              <>
+                <p style={{ fontSize: 14, fontWeight: 700, color: C.text, margin: "0 0 8px" }}>Stacks waiting</p>
+                <StackStepper value={reportStacks} onChange={setReportStacks} />
+
+                <p style={{ fontSize: 14, fontWeight: 700, color: C.text, margin: "18px 0 12px" }}>Conditions (optional)</p>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 28 }}>
+                  {CONDITION_OPTIONS.map(c => {
+                    const active = reportConditions.includes(c.key);
+                    return (
+                      <button key={c.key} onClick={() => setReportConditions(p => p.includes(c.key) ? p.filter(k => k !== c.key) : [...p, c.key])}
+                        style={{ padding: "12px 4px", borderRadius: 12, border: active ? `2.5px solid ${C.primary}` : `1.5px solid ${C.border}`, background: active ? C.primaryLight : C.card, cursor: "pointer", fontFamily: ff, display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                        <span style={{ color: active ? C.primary : C.muted }}><CondIcon type={c.icon} size={20} /></span>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: active ? C.primary : C.sub }}>{c.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <button onClick={submitCourtReport}
+                  style={{ width: "100%", padding: "15px", borderRadius: 14, border: "none", background: C.primary, color: "#fff", fontSize: 16, fontWeight: 700, fontFamily: ff, cursor: "pointer" }}>
+                  Update Court {court.id}
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ─── Main Shell ───
+  return (
+    <div style={{ width: "100%", maxWidth: 430, margin: "0 auto", height: "100vh", maxHeight: 932, background: C.bg, fontFamily: ff, display: "flex", flexDirection: "column", position: "relative", overflow: "hidden" }}>
+      <FontLoader />
+      <Banner />
+      <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden", WebkitOverflowScrolling: "touch", paddingBottom: 80 }}>
+
+        {/* ═══ HOME ═══ */}
+        {tab === "home" && (
+          <div>
+            <div style={{ padding: "12px 18px 14px", background: C.card, borderBottom: `1px solid ${C.border}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <p style={{ fontSize: 13, color: C.muted, margin: 0 }}>Pickleball Courts · Brooklyn, NY</p>
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <a href="https://maps.google.com/?q=Marine+Park+Pickleball+Courts+Brooklyn+NY" target="_blank" rel="noopener noreferrer"
+                    style={{ display: "flex", alignItems: "center", gap: 5, background: C.primaryLight, padding: "7px 12px", borderRadius: 10, textDecoration: "none", color: C.primary, fontSize: 12, fontWeight: 600 }}>
+                    {Icons.Nav(13)} Directions
+                  </a>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 5, background: C.bg, padding: "6px 10px", borderRadius: 8 }}>
+                  <span style={{ color: C.muted }}>{Icons.Clock(13)}</span>
+                  <span style={{ fontSize: 12, color: C.sub, fontWeight: 500 }}>{COURT_HOURS.open} – {COURT_HOURS.close}</span>
+                </div>
+              </div>
+            </div>
+
+            {activeConditions.length > 0 && (
+              <div style={{ margin: "12px 16px 0", padding: "10px 14px", background: C.yellowLight, borderRadius: 12, display: "flex", alignItems: "center", gap: 8, border: `1px solid ${C.yellow}33` }}>
+                <span style={{ color: C.yellow }}>{Icons.Alert(15)}</span>
+                <span style={{ fontSize: 13, color: C.sub, fontWeight: 500 }}>Active: {activeConditions.map(c => CONDITION_OPTIONS.find(o => o.key === c)?.label).join(", ")}</span>
+              </div>
+            )}
+
+            {/* Court Map */}
+            <div style={{ margin: "12px 16px 0", background: C.card, borderRadius: 16, padding: "14px 12px 10px", border: `1px solid ${C.border}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 4px", marginBottom: 8 }}>
+                <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>Courts Right Now</span>
+                <span style={{ fontSize: 11, color: C.muted }}>Tap for details</span>
+              </div>
+              <CourtMap courts={courts} onCourtTap={(id) => setSelectedCourt(id)} />
+              {/* Color legend */}
+              <div style={{ display: "flex", justifyContent: "center", gap: 14, marginTop: 10, paddingTop: 8, borderTop: `1px solid ${C.border}` }}>
+                {[{ l: "Open", c: C.green }, { l: "1 Stack", c: C.yellow }, { l: "2 Stacks", c: C.orange }, { l: "3+", c: C.red }].map(i => (
+                  <div key={i.l} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <div style={{ width: 12, height: 12, borderRadius: 3, background: i.c + "44", border: `2px solid ${i.c}` }} />
+                    <span style={{ fontSize: 11, color: C.sub, fontWeight: 500 }}>{i.l}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* AI Predictions Timeline */}
+            <PredictionTimeline />
+
+            {/* Live summary cards */}
+            <div style={{ display: "flex", gap: 10, margin: "12px 16px 0" }}>
+              <div style={{ flex: 1, background: C.greenLight, borderRadius: 14, padding: "14px", border: `1px solid ${C.green}22` }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: C.green, marginBottom: 4 }}>Live Reports</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: C.green }}>{courts.filter(c => c.stacks === 0).length} Open</div>
+                <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{courts.filter(c => c.stacks > 0).length} courts with waits</div>
+              </div>
+              <div style={{ flex: 1, background: C.primaryLight, borderRadius: 14, padding: "14px", border: `1px solid ${C.primary}22` }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: C.primary, marginBottom: 4 }}>Best Time</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: C.primary }}>2 PM</div>
+                <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>Crowd thins after lunch</div>
+              </div>
+            </div>
+
+            {/* Latest Reports */}
+            <div style={{ margin: "14px 16px 0", paddingBottom: 8 }}>
+              <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>Latest Reports</span>
+              {reports.slice(0, 2).map(r => (
+                <div key={r.id} style={{ background: C.card, borderRadius: 12, padding: "12px 14px", marginTop: 8, border: `1px solid ${C.border}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{r.user}</span>
+                    <span style={{ fontSize: 11, color: C.muted }}>{r.time}</span>
+                  </div>
+                  {r.text && <p style={{ fontSize: 14, color: C.sub, margin: "6px 0 0", lineHeight: 1.4 }}>{r.text}</p>}
+                  <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 6, background: OVERALL_LEVELS.find(l => l.key === r.level)?.color + "18", color: OVERALL_LEVELS.find(l => l.key === r.level)?.color }}>{OVERALL_LEVELS.find(l => l.key === r.level)?.label}</span>
+                    {r.conditions.map(c => (
+                      <span key={c} style={{ fontSize: 11, fontWeight: 500, padding: "2px 8px", borderRadius: 6, background: C.bg, color: C.sub }}>{CONDITION_OPTIONS.find(o => o.key === c)?.label}</span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ═══ REPORT (form auto-shown) ═══ */}
+        {tab === "report" && (
+          <div style={{ padding: "16px" }}>
+            {/* Report Form — always visible */}
+            <div style={{ background: C.card, borderRadius: 16, padding: "18px 16px", border: `1px solid ${C.border}`, marginBottom: 16 }}>
+              {reportSuccess ? (
+                <div style={{ textAlign: "center", padding: "24px 0" }}>
+                  <div style={{ width: 56, height: 56, borderRadius: 28, background: C.greenLight, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 10px", color: C.green, fontSize: 24 }}>&#10003;</div>
+                  <div style={{ fontSize: 17, fontWeight: 700, color: C.green }}>Report Submitted</div>
+                  <div style={{ fontSize: 13, color: C.muted, marginTop: 4 }}>Thanks for keeping everyone updated</div>
+                </div>
+              ) : (
+                <>
+                  <h3 style={{ fontSize: 17, fontWeight: 700, color: C.text, margin: "0 0 16px" }}>Report Park Conditions</h3>
+                  <p style={{ fontSize: 14, fontWeight: 700, color: C.text, margin: "0 0 10px" }}>How packed is it?</p>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 20 }}>
+                    {OVERALL_LEVELS.map(l => {
+                      const active = parkReportLevel === l.key;
+                      return (
+                        <button key={l.key} onClick={() => setParkReportLevel(l.key)}
+                          style={{ padding: "11px 14px", borderRadius: 12, border: active ? `2.5px solid ${l.color}` : `1.5px solid ${C.border}`, background: active ? l.color + "12" : C.card, cursor: "pointer", fontFamily: ff, display: "flex", alignItems: "center", gap: 12, textAlign: "left" }}>
+                          <div style={{ width: 10, height: 10, borderRadius: 5, background: l.color, flexShrink: 0 }} />
+                          <div>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: active ? l.color : C.text }}>{l.label}</div>
+                            <div style={{ fontSize: 12, color: C.muted }}>{l.desc}</div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p style={{ fontSize: 14, fontWeight: 700, color: C.text, margin: "0 0 10px" }}>Conditions (optional)</p>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 20 }}>
+                    {CONDITION_OPTIONS.map(c => {
+                      const active = parkReportConditions.includes(c.key);
+                      return (
+                        <button key={c.key} onClick={() => setParkReportConditions(p => p.includes(c.key) ? p.filter(k => k !== c.key) : [...p, c.key])}
+                          style={{ padding: "12px 4px", borderRadius: 12, border: active ? `2.5px solid ${C.primary}` : `1.5px solid ${C.border}`, background: active ? C.primaryLight : C.card, cursor: "pointer", fontFamily: ff, display: "flex", flexDirection: "column", alignItems: "center", gap: 5 }}>
+                          <span style={{ color: active ? C.primary : C.muted }}><CondIcon type={c.icon} size={20} /></span>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: active ? C.primary : C.sub }}>{c.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p style={{ fontSize: 14, fontWeight: 700, color: C.text, margin: "0 0 10px" }}>Add a note (optional)</p>
+                  <textarea value={parkReportText} onChange={e => setParkReportText(e.target.value)} placeholder="Wind from the east, courts are dry..."
+                    style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1.5px solid ${C.border}`, fontSize: 14, fontFamily: ff, color: C.text, background: C.bg, resize: "none", height: 64, outline: "none", boxSizing: "border-box" }} />
+                  <button onClick={submitParkReport} disabled={!parkReportLevel}
+                    style={{ width: "100%", padding: "15px", borderRadius: 14, border: "none", marginTop: 14, background: parkReportLevel ? C.primary : C.border, color: parkReportLevel ? "#fff" : C.muted, fontSize: 16, fontWeight: 700, fontFamily: ff, cursor: parkReportLevel ? "pointer" : "default" }}>
+                    Submit Report
+                  </button>
+                </>
+              )}
+            </div>
+
+            {/* Past reports below */}
+            <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 10 }}>Recent Reports</div>
+            {reports.map(r => (
+              <div key={r.id} style={{ background: C.card, borderRadius: 14, padding: "12px 14px", marginBottom: 8, border: `1px solid ${C.border}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{r.user}</span>
+                  <span style={{ fontSize: 11, color: C.muted }}>{r.time}</span>
+                </div>
+                <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 7, background: OVERALL_LEVELS.find(l => l.key === r.level)?.color + "18", color: OVERALL_LEVELS.find(l => l.key === r.level)?.color }}>{OVERALL_LEVELS.find(l => l.key === r.level)?.label}</span>
+                  {r.conditions.map(c => (
+                    <span key={c} style={{ fontSize: 11, fontWeight: 500, padding: "3px 8px", borderRadius: 7, background: C.bg, color: C.sub, border: `1px solid ${C.border}` }}>{CONDITION_OPTIONS.find(o => o.key === c)?.label}</span>
+                  ))}
+                </div>
+                {r.text && <p style={{ fontSize: 13, color: C.sub, margin: "6px 0 0", lineHeight: 1.4 }}>{r.text}</p>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ═══ CHAT ═══ */}
+        {tab === "chat" && (
+          <div style={{ padding: "16px 16px 60px" }}>
+            <div style={{ textAlign: "center", marginBottom: 16 }}>
+              <span style={{ fontSize: 12, color: C.muted, background: C.card, padding: "5px 14px", borderRadius: 16, border: `1px solid ${C.border}` }}>Marine Park Community</span>
+            </div>
+            {mainChat.map(m => (
+              <div key={m.id} style={{ display: "flex", justifyContent: m.self ? "flex-end" : "flex-start", marginBottom: 10 }}>
+                <div style={{ maxWidth: "78%" }}>
+                  {!m.self && <div style={{ fontSize: 11, fontWeight: 700, color: C.primary, marginBottom: 3, paddingLeft: 10 }}>{m.name}</div>}
+                  <div style={{ background: m.self ? C.chatSelf : C.chatOther, color: m.self ? "#fff" : C.text, borderRadius: m.self ? "18px 18px 4px 18px" : "18px 18px 18px 4px", padding: "10px 15px", fontSize: 15, lineHeight: 1.45, fontFamily: ff, border: m.self ? "none" : `1px solid ${C.border}` }}>{m.text}</div>
+                  <div style={{ fontSize: 10, color: C.muted, marginTop: 2, textAlign: m.self ? "right" : "left", padding: "0 10px" }}>{m.time}</div>
+                </div>
+              </div>
+            ))}
+            <div ref={chatEndRef} />
+          </div>
+        )}
+      </div>
+
+      {/* Chat Input */}
+      {tab === "chat" && (
+        <div style={{ position: "absolute", bottom: 64, left: 0, right: 0, padding: "10px 16px", background: C.card, borderTop: `1px solid ${C.border}`, display: "flex", gap: 10 }}>
+          <input type="text" placeholder="Message Marine Park..." value={chatInput} onChange={e => setChatInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") sendMainChat(); }}
+            style={{ flex: 1, padding: "12px 16px", borderRadius: 22, border: `1.5px solid ${C.border}`, fontSize: 15, fontFamily: ff, color: C.text, background: C.bg, outline: "none" }} />
+          <button onClick={sendMainChat} disabled={!chatInput.trim()}
+            style={{ width: 44, height: 44, borderRadius: 22, background: chatInput.trim() ? C.primary : C.border, border: "none", cursor: chatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>{Icons.Send(18)}</button>
+        </div>
+      )}
+
+      {/* Tab Bar — 3 tabs: Home, Report, Chat */}
+      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 64, background: C.card, borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-around", alignItems: "center", paddingBottom: 4 }}>
+        {[
+          { key: "home", label: "Home", icon: Icons.Home },
+          { key: "report", label: "Report", icon: Icons.Report },
+          { key: "chat", label: "Chat", icon: Icons.Chat, badge: 3 },
+        ].map(t => (
+          <button key={t.key} onClick={() => setTab(t.key)}
+            style={{ background: "none", border: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, padding: "6px 20px", position: "relative" }}>
+            <span style={{ color: tab === t.key ? C.primary : C.muted }}>{t.icon()}</span>
+            <span style={{ fontSize: 11, fontWeight: tab === t.key ? 700 : 500, color: tab === t.key ? C.primary : C.muted }}>{t.label}</span>
+            {t.badge && tab !== t.key && (
+              <div style={{ position: "absolute", top: 0, right: 10, width: 16, height: 16, borderRadius: 8, background: C.red, color: "#fff", fontSize: 9, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center" }}>{t.badge}</div>
+            )}
+          </button>
+        ))}
       </div>
     </div>
   );
