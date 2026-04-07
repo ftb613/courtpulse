@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import { supabase } from "./supabase";
 
 // ─── Design Tokens ───
 const C = {
@@ -57,33 +58,15 @@ const COURT_TYPES = {
 const INIT_COURTS = [
   { id: 1, type: "beginner", stacks: 0, conditions: [], lastReport: null, reporter: null },
   { id: 2, type: "regular", stacks: 0, conditions: [], lastReport: null, reporter: null },
-  { id: 3, type: "regular", stacks: 1, conditions: [], lastReport: "3m ago", reporter: "Sarah K." },
-  { id: 4, type: "challenge", stacks: 2, conditions: [], lastReport: "1m ago", reporter: "Dave R." },
+  { id: 3, type: "regular", stacks: 0, conditions: [], lastReport: null, reporter: null },
+  { id: 4, type: "challenge", stacks: 0, conditions: [], lastReport: null, reporter: null },
   { id: 5, type: "beginner", stacks: 0, conditions: [], lastReport: null, reporter: null },
-  { id: 6, type: "regular", stacks: 1.5, conditions: ["windy"], lastReport: "8m ago", reporter: "Lisa M." },
+  { id: 6, type: "regular", stacks: 0, conditions: [], lastReport: null, reporter: null },
   { id: 7, type: "regular", stacks: 0, conditions: [], lastReport: null, reporter: null },
-  { id: 8, type: "challenge", stacks: 0.5, conditions: [], lastReport: "12m ago", reporter: "Mike T." },
+  { id: 8, type: "challenge", stacks: 0, conditions: [], lastReport: null, reporter: null },
 ];
 
-// ─── Demo Data ───
-const INIT_REPORTS = [
-  { id: 1, court: 4, stacks: 2, conditions: [], user: "Dave R.", time: "10:41 AM", text: "" },
-  { id: 2, court: 8, stacks: 0.5, conditions: [], user: "Mike T.", time: "10:39 AM", text: "" },
-  { id: 3, court: 3, stacks: 1, conditions: [], user: "Sarah K.", time: "10:38 AM", text: "" },
-  { id: 4, court: 6, stacks: 1.5, conditions: ["windy"], user: "Lisa M.", time: "10:33 AM", text: "Wind picking up on this side" },
-];
-
-const INIT_MAIN_CHAT = [
-  { id: 1, name: "Mike T.", text: "Courts looking good this morning, just got here", time: "10:23 AM", self: false, flagged: false, deleted: false },
-  { id: 2, name: "Sarah K.", text: "Heading over in 20, anyone want to play doubles?", time: "10:31 AM", self: false, flagged: false, deleted: false },
-  { id: 3, name: "You", text: "I'm down! Be there in 15", time: "10:33 AM", self: true, flagged: false, deleted: false },
-  { id: 4, name: "Dave R.", text: "Court 3 is running competitive games rn, heads up", time: "10:40 AM", self: false, flagged: false, deleted: false },
-  { id: 5, name: "Lisa M.", text: "Court 6 area is getting windy", time: "10:45 AM", self: false, flagged: false, deleted: false },
-];
-
-const makeCourtChat = (id) => [
-  { id: 1, name: "Player", text: `Anyone at court ${id}?`, time: "10:15 AM", self: false, flagged: false, deleted: false },
-];
+// (Demo data removed — loaded from Supabase)
 
 // ─── AI Prediction Data (placeholder) ───
 const PREDICTED_TIMES = {
@@ -182,15 +165,226 @@ export default function CourtPulse() {
   // ─── App State ───
   const [tab, setTab] = useState("home");
   const [courts, setCourts] = useState(INIT_COURTS);
-  const [reports, setReports] = useState(INIT_REPORTS);
-  const [mainChat, setMainChat] = useState(INIT_MAIN_CHAT);
-  const [courtChats, setCourtChats] = useState(() => {
-    const obj = {};
-    INIT_COURTS.forEach(c => { obj[c.id] = makeCourtChat(c.id); });
-    return obj;
-  });
+  const [reports, setReports] = useState([]);
+  const [mainChat, setMainChat] = useState([]);
+  const [courtChats, setCourtChats] = useState({});
   const [chatInput, setChatInput] = useState("");
   const [courtChatInput, setCourtChatInput] = useState("");
+
+  // ─── Court UUID Map (court_number → UUID for Supabase writes) ───
+  const courtUuidMap = useRef({});
+
+  // ─── Load data from Supabase ───
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadData = async () => {
+      // Fetch courts with UUIDs
+      const { data: dbCourts } = await supabase
+        .from("courts")
+        .select("id, court_number, court_type")
+        .eq("park_id", "marine-park")
+        .order("court_number");
+
+      if (dbCourts && !cancelled) {
+        const map = {};
+        dbCourts.forEach(c => { map[c.court_number] = c.id; });
+        courtUuidMap.current = map;
+
+        // Merge DB court types into local court state
+        setCourts(prev => prev.map(c => {
+          const db = dbCourts.find(d => d.court_number === c.id);
+          return db ? { ...c, type: db.court_type } : c;
+        }));
+      }
+
+      // Fetch recent reports (last 24 hours)
+      const { data: dbReports } = await supabase
+        .from("reports")
+        .select("*, courts!reports_court_id_fkey(court_number)")
+        .eq("park_id", "marine-park")
+        .order("created_at", { ascending: false })
+        .limit(20);
+
+      if (dbReports && !cancelled) {
+        const mapped = dbReports.map(r => ({
+          id: r.id,
+          court: r.courts?.court_number || null,
+          stacks: r.stacks !== null ? Number(r.stacks) : null,
+          conditions: r.conditions || [],
+          user: r.reporter_name || "Anonymous",
+          time: new Date(r.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+          text: r.comment || "",
+          level: r.overall_level,
+        }));
+        setReports(mapped);
+
+        // Update court stacks from latest reports
+        setCourts(prev => {
+          const updated = [...prev];
+          const latest = {};
+          dbReports.forEach(r => {
+            if (r.courts?.court_number && !latest[r.courts.court_number]) {
+              latest[r.courts.court_number] = r;
+            }
+          });
+          return updated.map(c => {
+            const lr = latest[c.id];
+            if (lr) {
+              const mins = Math.round((Date.now() - new Date(lr.created_at).getTime()) / 60000);
+              return {
+                ...c,
+                stacks: Number(lr.stacks) || 0,
+                conditions: lr.conditions || [],
+                lastReport: mins < 1 ? "Just now" : `${mins}m ago`,
+                reporter: lr.reporter_name || "Anonymous",
+              };
+            }
+            return c;
+          });
+        });
+      }
+
+      // Fetch main chat messages
+      const { data: dbMainChat } = await supabase
+        .from("chat_messages")
+        .select("*")
+        .eq("park_id", "marine-park")
+        .is("court_id", null)
+        .order("created_at", { ascending: true })
+        .limit(50);
+
+      if (dbMainChat && !cancelled) {
+        setMainChat(dbMainChat.map(m => ({
+          id: m.id,
+          name: m.user_name || "Anonymous",
+          text: m.text,
+          time: new Date(m.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+          self: m.user_name === userName,
+          flagged: m.flagged || false,
+          deleted: m.deleted || false,
+        })));
+      }
+
+      // Fetch court-specific chats
+      const { data: dbCourtChats } = await supabase
+        .from("chat_messages")
+        .select("*, courts!chat_messages_court_id_fkey(court_number)")
+        .eq("park_id", "marine-park")
+        .not("court_id", "is", null)
+        .order("created_at", { ascending: true })
+        .limit(100);
+
+      if (dbCourtChats && !cancelled) {
+        const grouped = {};
+        INIT_COURTS.forEach(c => { grouped[c.id] = []; });
+        dbCourtChats.forEach(m => {
+          const num = m.courts?.court_number;
+          if (num) {
+            grouped[num] = grouped[num] || [];
+            grouped[num].push({
+              id: m.id,
+              name: m.user_name || "Anonymous",
+              text: m.text,
+              time: new Date(m.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+              self: m.user_name === userName,
+              flagged: m.flagged || false,
+              deleted: m.deleted || false,
+            });
+          }
+        });
+        setCourtChats(grouped);
+      }
+    };
+
+    if (userName) loadData();
+
+    // ─── Real-time subscriptions ───
+    const channel = supabase.channel("courtpulse-realtime");
+
+    // Listen for new chat messages
+    channel.on("postgres_changes", { event: "INSERT", schema: "public", table: "chat_messages", filter: "park_id=eq.marine-park" }, (payload) => {
+      const m = payload.new;
+      const msg = {
+        id: m.id,
+        name: m.user_name || "Anonymous",
+        text: m.text,
+        time: new Date(m.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+        self: m.user_name === userName,
+        flagged: m.flagged || false,
+        deleted: m.deleted || false,
+      };
+      if (!m.court_id) {
+        setMainChat(prev => {
+          if (prev.some(p => p.id === m.id)) return prev;
+          return [...prev, msg];
+        });
+      } else {
+        // Find court_number from UUID
+        const courtNum = Object.entries(courtUuidMap.current).find(([, uuid]) => uuid === m.court_id)?.[0];
+        if (courtNum) {
+          setCourtChats(prev => {
+            const existing = prev[courtNum] || [];
+            if (existing.some(p => p.id === m.id)) return prev;
+            return { ...prev, [courtNum]: [...existing, msg] };
+          });
+        }
+      }
+    });
+
+    // Listen for chat message updates (flags, deletes)
+    channel.on("postgres_changes", { event: "UPDATE", schema: "public", table: "chat_messages", filter: "park_id=eq.marine-park" }, (payload) => {
+      const m = payload.new;
+      const updater = (prev) => prev.map(p => p.id === m.id ? { ...p, flagged: m.flagged || false, deleted: m.deleted || false, text: m.deleted ? "" : p.text } : p);
+      if (!m.court_id) {
+        setMainChat(updater);
+      } else {
+        const courtNum = Object.entries(courtUuidMap.current).find(([, uuid]) => uuid === m.court_id)?.[0];
+        if (courtNum) {
+          setCourtChats(prev => ({ ...prev, [courtNum]: updater(prev[courtNum] || []) }));
+        }
+      }
+    });
+
+    // Listen for new reports
+    channel.on("postgres_changes", { event: "INSERT", schema: "public", table: "reports", filter: "park_id=eq.marine-park" }, async (payload) => {
+      const r = payload.new;
+      // Look up court number
+      let courtNum = null;
+      if (r.court_id) {
+        courtNum = Number(Object.entries(courtUuidMap.current).find(([, uuid]) => uuid === r.court_id)?.[0]) || null;
+      }
+      const report = {
+        id: r.id,
+        court: courtNum,
+        stacks: r.stacks !== null ? Number(r.stacks) : null,
+        conditions: r.conditions || [],
+        user: r.reporter_name || "Anonymous",
+        time: new Date(r.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+        text: r.comment || "",
+        level: r.overall_level,
+      };
+      setReports(prev => {
+        if (prev.some(p => p.id === r.id)) return prev;
+        return [report, ...prev];
+      });
+
+      // Update court status if court-specific
+      if (courtNum && r.stacks !== null) {
+        setCourts(prev => prev.map(c => c.id === courtNum
+          ? { ...c, stacks: Number(r.stacks), conditions: r.conditions || [], lastReport: "Just now", reporter: r.reporter_name || "Anonymous" }
+          : c
+        ));
+      }
+    });
+
+    channel.subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
+  }, [userName]);
 
   // ─── UI State ───
   const [selectedCourt, setSelectedCourt] = useState(null);
@@ -224,19 +418,8 @@ export default function CourtPulse() {
     if (selectedCourt && courtChatEndRef.current) courtChatEndRef.current.scrollIntoView({ behavior: "smooth" });
   }, [selectedCourt, courtChats]);
 
-  // Simulate typing indicator when user sends a message (demo: someone types back after 2s)
-  useEffect(() => {
-    if (mainChat.length > 5 && mainChat[mainChat.length - 1]?.self) {
-      const t1 = setTimeout(() => setSomeoneTyping(true), 2000);
-      const t2 = setTimeout(() => {
-        setSomeoneTyping(false);
-        // Simulate a response
-        const time = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-        setMainChat(p => [...p, { id: Date.now(), name: "Mike T.", text: "Nice, see you there!", time, self: false, flagged: false, deleted: false }]);
-      }, 4500);
-      return () => { clearTimeout(t1); clearTimeout(t2); };
-    }
-  }, [mainChat.length]);
+  // Typing indicator will be driven by Supabase presence in production
+  // (bot auto-reply removed)
 
   // Scroll detection for scroll-to-bottom button
   const handleChatScroll = useCallback((e) => {
@@ -255,30 +438,45 @@ export default function CourtPulse() {
   };
 
   // ─── Auth ───
-  const handleJoin = () => {
+  const handleJoin = async () => {
     if (!nameInput.trim()) return;
-    try { localStorage.setItem("courtpulse_name", nameInput.trim()); } catch {}
-    try { if (contactInput.trim()) localStorage.setItem("courtpulse_contact", contactInput.trim()); } catch {}
-    setUserName(nameInput.trim());
+    const name = nameInput.trim();
+    const contact = contactInput.trim() || null;
+    try { localStorage.setItem("courtpulse_name", name); } catch {}
+    try { if (contact) localStorage.setItem("courtpulse_contact", contact); } catch {}
+    // Save to Supabase users table
+    await supabase.from("users").insert({ name, contact }).catch(() => {});
+    setUserName(name);
   };
 
   // ─── Chat ───
-  const sendMainChat = useCallback(() => {
+  const sendMainChat = useCallback(async () => {
     if (!chatInput.trim()) return;
-    const time = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    setMainChat(p => [...p, { id: Date.now(), name: "You", text: chatInput.trim(), time, self: true, flagged: false, deleted: false }]);
+    const text = chatInput.trim();
     setChatInput("");
-  }, [chatInput]);
+    const { error } = await supabase.from("chat_messages").insert({
+      park_id: "marine-park",
+      court_id: null,
+      user_name: userName,
+      text,
+    });
+    if (error) console.error("Chat send error:", error);
+  }, [chatInput, userName]);
 
-  const sendCourtChat = useCallback(() => {
+  const sendCourtChat = useCallback(async () => {
     if (!courtChatInput.trim() || !selectedCourt) return;
-    const time = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    setCourtChats(p => ({
-      ...p,
-      [selectedCourt]: [...(p[selectedCourt] || []), { id: Date.now(), name: "You", text: courtChatInput.trim(), time, self: true, flagged: false, deleted: false }]
-    }));
+    const text = courtChatInput.trim();
+    const courtUuid = courtUuidMap.current[selectedCourt];
     setCourtChatInput("");
-  }, [courtChatInput, selectedCourt]);
+    if (!courtUuid) return;
+    const { error } = await supabase.from("chat_messages").insert({
+      park_id: "marine-park",
+      court_id: courtUuid,
+      user_name: userName,
+      text,
+    });
+    if (error) console.error("Court chat send error:", error);
+  }, [courtChatInput, selectedCourt, userName]);
 
   // ─── Flag Message ───
   const handleFlag = (msgId, chatType) => {
@@ -286,17 +484,13 @@ export default function CourtPulse() {
     setOpenMenu(null);
   };
 
-  const confirmFlag = () => {
+  const confirmFlag = async () => {
     if (!flagConfirm) return;
-    const { msgId, chatType } = flagConfirm;
-    if (chatType === "main") {
-      setMainChat(p => p.map(m => m.id === msgId ? { ...m, flagged: true } : m));
-    } else {
-      setCourtChats(p => ({
-        ...p,
-        [chatType]: (p[chatType] || []).map(m => m.id === msgId ? { ...m, flagged: true } : m)
-      }));
-    }
+    const { msgId } = flagConfirm;
+    // Update chat_messages flagged status
+    await supabase.from("chat_messages").update({ flagged: true, flagged_at: new Date().toISOString(), flagged_by: userName }).eq("id", msgId);
+    // Insert into message_flags
+    await supabase.from("message_flags").insert({ message_id: msgId, flagged_by: userName, reason: "user_report" });
     setFlagConfirm(null);
     showToast("Message reported. Thank you.");
   };
@@ -307,47 +501,63 @@ export default function CourtPulse() {
     setOpenMenu(null);
   };
 
-  const confirmDelete = () => {
+  const confirmDelete = async () => {
     if (!deleteConfirm) return;
-    const { msgId, chatType } = deleteConfirm;
-    if (chatType === "main") {
-      setMainChat(p => p.map(m => m.id === msgId ? { ...m, deleted: true, text: "" } : m));
-    } else {
-      setCourtChats(p => ({
-        ...p,
-        [chatType]: (p[chatType] || []).map(m => m.id === msgId ? { ...m, deleted: true, text: "" } : m)
-      }));
-    }
+    const { msgId } = deleteConfirm;
+    await supabase.from("chat_messages").update({ deleted: true, deleted_at: new Date().toISOString(), text: "" }).eq("id", msgId);
     setDeleteConfirm(null);
     showToast("Message deleted.");
   };
 
   // ─── Court Report ───
-  const submitCourtReport = useCallback(() => {
+  const submitCourtReport = useCallback(async () => {
     if (reportStacks === null || !selectedCourt) return;
+    const courtUuid = courtUuidMap.current[selectedCourt];
+    if (!courtUuid) return;
+
+    // Optimistic UI update
     setCourts(p => p.map(c => c.id === selectedCourt
       ? { ...c, stacks: reportStacks, conditions: reportConditions, lastReport: "Just now", reporter: "You" }
       : c
     ));
-    const time = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    setReports(p => [{ id: Date.now(), court: selectedCourt, stacks: reportStacks, conditions: reportConditions, user: "You", time, text: reportText }, ...p]);
+
+    const { error } = await supabase.from("reports").insert({
+      park_id: "marine-park",
+      court_id: courtUuid,
+      stacks: reportStacks,
+      conditions: reportConditions,
+      comment: reportText || null,
+      reporter_name: userName,
+      status: reportStacks === 0 ? "open" : "in-use",
+    });
+
+    if (error) console.error("Report submit error:", error);
     setShowCourtReport(false);
     setReportStacks(0);
     setReportConditions([]);
     setReportText("");
     showToast("Report submitted!");
-  }, [reportStacks, reportConditions, reportText, selectedCourt]);
+  }, [reportStacks, reportConditions, reportText, selectedCourt, userName]);
 
   // ─── Park-Level Report ───
-  const submitParkReport = useCallback(() => {
+  const submitParkReport = useCallback(async () => {
     if (parkReportLevel === null) return;
-    const time = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    setReports(p => [{ id: Date.now(), court: null, stacks: null, conditions: parkReportConditions, user: "You", time, text: parkReportText || `Overall: ${["Empty","Half Playing","All Playing","1 Stack / Half","1 Stack / All","2+ Stacks"][parkReportLevel]}`, level: parkReportLevel }, ...p]);
+    const levelLabels = ["Empty","Half Playing","All Playing","1 Stack / Half","1 Stack / All","2+ Stacks"];
+    const { error } = await supabase.from("reports").insert({
+      park_id: "marine-park",
+      court_id: null,
+      stacks: null,
+      overall_level: parkReportLevel,
+      conditions: parkReportConditions,
+      comment: parkReportText || `Overall: ${levelLabels[parkReportLevel]}`,
+      reporter_name: userName,
+    });
+    if (error) console.error("Park report error:", error);
     setParkReportLevel(null);
     setParkReportConditions([]);
     setParkReportText("");
     showToast("Report submitted!");
-  }, [parkReportLevel, parkReportConditions, parkReportText]);
+  }, [parkReportLevel, parkReportConditions, parkReportText, userName]);
 
   // Close menu on outside tap
   useEffect(() => {
