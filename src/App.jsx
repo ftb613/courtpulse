@@ -37,15 +37,19 @@ const PARK = {
 
 const WEATHER = { temp: 68, icon: "sun", wind: "8 mph" };
 
-// ─── Weekly Forecast ───
-const WEEKLY_FORECAST = [
-  { day: "Today", high: 68, low: 54, wind: 8, rain: 10, icon: "sun" },
-  { day: "Wed", high: 72, low: 56, wind: 6, rain: 5, icon: "sun" },
-  { day: "Thu", high: 65, low: 50, wind: 14, rain: 40, icon: "cloud" },
-  { day: "Fri", high: 60, low: 48, wind: 18, rain: 70, icon: "rain" },
-  { day: "Sat", high: 63, low: 49, wind: 10, rain: 30, icon: "partcloud" },
-  { day: "Sun", high: 70, low: 55, wind: 7, rain: 10, icon: "sun" },
-  { day: "Mon", high: 74, low: 58, wind: 5, rain: 5, icon: "sun" },
+// ─── Hourly Forecast (today) ───
+const HOURLY_FORECAST = [
+  { hour: "Now", temp: 68, icon: "sun" },
+  { hour: "10a", temp: 70, icon: "sun" },
+  { hour: "11a", temp: 72, icon: "sun" },
+  { hour: "12p", temp: 74, icon: "partcloud" },
+  { hour: "1p", temp: 74, icon: "partcloud" },
+  { hour: "2p", temp: 73, icon: "cloud" },
+  { hour: "3p", temp: 71, icon: "cloud" },
+  { hour: "4p", temp: 68, icon: "rain" },
+  { hour: "5p", temp: 65, icon: "rain" },
+  { hour: "6p", temp: 63, icon: "cloud" },
+  { hour: "7p", temp: 60, icon: "cloud" },
 ];
 
 // ─── Court Data (FIXED: 1,5=beginner left, 4,8=challenge right, rest=regular) ───
@@ -400,6 +404,7 @@ export default function CourtPulse() {
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [openMenu, setOpenMenu] = useState(null); // { msgId, chatType }
   const [showScrollBtn, setShowScrollBtn] = useState(false);
+  const [showReportExtras, setShowReportExtras] = useState(false);
 
   // Typing indicator simulation
   const [someoneTyping, setSomeoneTyping] = useState(false);
@@ -655,7 +660,7 @@ export default function CourtPulse() {
   // COURT MAP (v2 style — filled color rects with stroke)
   // ═══════════════════════════════════════════════════════════════════════
   const courtMap = (() => {
-    const w = 380, h = 250, cW = 76, cH = 82, gap = 10;
+    const w = 420, h = 270, cW = 90, cH = 100, gap = 10;
     const startX = (w - (cW * 4 + gap * 3)) / 2;
     const topY = 22;
     const botY = topY + cH + 30;
@@ -667,13 +672,13 @@ export default function CourtPulse() {
 
     return (
       <div style={{ ...s.section, marginTop: 16 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 10 }}>Court Status</div>
         <svg width="100%" viewBox={`0 0 ${w} ${h}`} style={{ display: "block" }}>
           <rect x="0" y="0" width={w} height={h} rx="14" fill="#2D5A27" opacity="0.08"/>
           <rect x="4" y="4" width={w-8} height={h-8} rx="12" fill="#3A7233" opacity="0.04"/>
 
-          {/* Net dividers */}
+          {/* Net divider line only */}
           <line x1={startX-6} y1={topY+cH+15} x2={startX+cW*4+gap*3+6} y2={topY+cH+15} stroke="#5A6270" strokeWidth="1.5" strokeDasharray="8,5" opacity="0.18"/>
-          <text x={w/2} y={topY+cH+12} textAnchor="middle" fontSize="7.5" fill="#5A6270" fontFamily={ff} opacity="0.45" fontWeight="600">NET DIVIDERS</text>
 
           {/* Entrance */}
           <text x={w/2} y={h-5} textAnchor="middle" fontSize="8" fill="#5A6270" fontFamily={ff} opacity="0.45" fontWeight="600">ENTRANCE</text>
@@ -690,19 +695,16 @@ export default function CourtPulse() {
 
             return (
               <g key={court.id} onClick={() => setSelectedCourt(court.id)} style={{ cursor: "pointer" }}>
-                <rect x={x} y={y} width={cW} height={cH} rx="7" fill={cc.fill} stroke={cc.stroke} strokeWidth="2.5"/>
-                {/* Inner court lines */}
-                <line x1={x+5} y1={y+cH/2} x2={x+cW-5} y2={y+cH/2} stroke={cc.stroke} strokeWidth="0.7" opacity="0.3"/>
-                <rect x={x+cW*0.18} y={y+cH*0.18} width={cW*0.64} height={cH*0.64} rx="3" fill="none" stroke={cc.stroke} strokeWidth="0.5" opacity="0.2"/>
+                <rect x={x} y={y} width={cW} height={cH} rx="8" fill={cc.fill} stroke={cc.stroke} strokeWidth="2.5"/>
 
                 {/* Court number */}
-                <text x={x+cW/2} y={y+cH/2+(typeLabel ? 0 : 5)} textAnchor="middle" fontSize="16" fontWeight="800" fill={cc.stroke} fontFamily={ff}>{court.id}</text>
+                <text x={x+cW/2} y={y+cH/2+(typeLabel ? 0 : 5)} textAnchor="middle" fontSize="20" fontWeight="800" fill={cc.stroke} fontFamily={ff}>{court.id}</text>
 
                 {/* Court type label for beginner/challenge */}
                 {typeLabel && (
                   <g>
-                    <rect x={x+8} y={y+cH/2+7} width={cW-16} height={15} rx="4" fill={typeColor} opacity="0.15"/>
-                    <text x={x+cW/2} y={y+cH/2+18} textAnchor="middle" fontSize="7.5" fontWeight="700" fill={typeColor} fontFamily={ff} opacity="0.9">{typeLabel}</text>
+                    <rect x={x+(cW-60)/2} y={y+cH/2+7} width={60} height={17} rx="5" fill={typeColor} opacity="0.15"/>
+                    <text x={x+cW/2} y={y+cH/2+19} textAnchor="middle" fontSize="8.5" fontWeight="700" fill={typeColor} fontFamily={ff} opacity="0.9">{typeLabel}</text>
                   </g>
                 )}
 
@@ -730,9 +732,9 @@ export default function CourtPulse() {
 
         {/* Last report timestamp */}
         {lastReportTime && (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 5, marginTop: 10, opacity: 0.7 }}>
-            <span style={{ color: C.muted }}>{Icons.Clock(11)}</span>
-            <span style={{ fontSize: 11, color: C.muted, fontWeight: 500 }}>Last report at {lastReportTime} by {lastReportUser}</span>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginTop: 10 }}>
+            <span style={{ color: C.sub }}>{Icons.Clock(13)}</span>
+            <span style={{ fontSize: 13, color: C.sub, fontWeight: 500 }}>Last report at {lastReportTime} by {lastReportUser}</span>
           </div>
         )}
       </div>
@@ -744,35 +746,21 @@ export default function CourtPulse() {
   // ═══════════════════════════════════════════════════════════════════════
   const weatherWidget = (
     <div style={{ ...s.section }}>
-      <div style={{ ...s.card, padding: "14px 16px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 12 }}>
-          <span style={{ color: "#F0C040" }}>{Icons.Sun(16)}</span>
-          <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>7-Day Forecast</span>
-        </div>
-        <div style={{ display: "flex", gap: 0 }}>
-          {WEEKLY_FORECAST.map((d, i) => (
-            <div key={d.day} style={{
-              flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 5,
-              padding: "8px 2px", borderRadius: 10,
+      <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 10 }}>Today's Weather</div>
+      <div style={{ ...s.card, padding: "14px 0" }}>
+        <div style={{ display: "flex", gap: 0, overflowX: "auto", padding: "0 14px", WebkitOverflowScrolling: "touch" }}>
+          {HOURLY_FORECAST.map((h, i) => (
+            <div key={i} style={{
+              display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+              minWidth: 56, padding: "6px 4px", borderRadius: 10,
               background: i === 0 ? C.primaryLight : "transparent",
               border: i === 0 ? `1.5px solid ${C.primary}33` : "1px solid transparent",
             }}>
-              <span style={{ fontSize: 10, fontWeight: i === 0 ? 800 : 600, color: i === 0 ? C.primary : C.sub }}>{d.day}</span>
-              <span style={{ color: d.icon === "rain" ? C.primary : d.icon === "cloud" ? C.muted : "#F0C040" }}>
-                <WeatherIcon type={d.icon} size={18} />
+              <span style={{ fontSize: 12, fontWeight: i === 0 ? 700 : 500, color: i === 0 ? C.primary : C.sub }}>{h.hour}</span>
+              <span style={{ color: h.icon === "rain" ? C.primary : h.icon === "cloud" ? C.muted : "#F0C040" }}>
+                <WeatherIcon type={h.icon} size={18} />
               </span>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
-                <span style={{ fontSize: 13, fontWeight: 800, color: C.text }}>{d.high}°</span>
-                <span style={{ fontSize: 10, color: C.muted, fontWeight: 500 }}>{d.low}°</span>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
-                <span style={{ color: C.muted }}>{Icons.Wind(8)}</span>
-                <span style={{ fontSize: 8, color: C.muted, fontWeight: 500 }}>{d.wind}</span>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
-                <span style={{ color: d.rain >= 50 ? C.primary : C.muted }}>{Icons.Drop(8)}</span>
-                <span style={{ fontSize: 8, color: d.rain >= 50 ? C.primary : C.muted, fontWeight: d.rain >= 50 ? 700 : 500 }}>{d.rain}%</span>
-              </div>
+              <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{h.temp}°</span>
             </div>
           ))}
         </div>
@@ -836,29 +824,24 @@ export default function CourtPulse() {
       <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 10 }}>Latest Reports</div>
       {reports.slice(0, 5).map(r => {
         const sc = r.stacks !== null ? getStackColor(r.stacks) : null;
+        const borderColor = sc ? sc.color : C.border;
+        const stackLabel = sc ? (r.stacks === 0 ? "Empty" : `${formatStacks(r.stacks)} stack${r.stacks !== 1 ? "s" : ""}`) : null;
         return (
-          <div key={r.id} style={{ ...s.card, padding: "12px 14px", display: "flex", alignItems: "flex-start", gap: 10 }}>
-            {sc && (
-              <div style={{ width: 36, height: 36, borderRadius: 10, background: sc.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800, color: sc.color, flexShrink: 0 }}>
-                {formatStacks(r.stacks)}
+          <div key={r.id} style={{ ...s.card, padding: "10px 14px", borderLeft: `4px solid ${borderColor}` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>
+                {r.court ? `Court ${r.court}` : "Overall"}{stackLabel ? ` · ${stackLabel}` : ""}{r.user ? ` · ${r.user}` : ""}
+              </span>
+              <span style={{ fontSize: 11, color: C.muted }}>{r.time}</span>
+            </div>
+            {r.text && <div style={{ fontSize: 12, color: C.sub, marginTop: 3 }}>{r.text}</div>}
+            {r.conditions?.length > 0 && (
+              <div style={{ display: "flex", gap: 4, marginTop: 5 }}>
+                {r.conditions.map(c => (
+                  <span key={c} style={{ fontSize: 10, background: C.yellowLight, color: C.yellow, padding: "2px 6px", borderRadius: 4, fontWeight: 600 }}>{c}</span>
+                ))}
               </div>
             )}
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>
-                  {r.court ? `Court ${r.court}` : "Overall"}{r.user && ` · ${r.user}`}
-                </span>
-                <span style={{ fontSize: 11, color: C.muted }}>{r.time}</span>
-              </div>
-              {r.text && <div style={{ fontSize: 12, color: C.sub, marginTop: 3 }}>{r.text}</div>}
-              {r.conditions?.length > 0 && (
-                <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
-                  {r.conditions.map(c => (
-                    <span key={c} style={{ fontSize: 10, background: C.yellowLight, color: C.yellow, padding: "2px 6px", borderRadius: 4, fontWeight: 600 }}>{c}</span>
-                  ))}
-                </div>
-              )}
-            </div>
           </div>
         );
       })}
@@ -933,28 +916,40 @@ export default function CourtPulse() {
               );
             })}
           </div>
-          <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 8 }}>Conditions</div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
-            {CONDITIONS.map(c => {
-              const active = parkReportConditions.includes(c.key);
-              return (
-                <button key={c.key} onClick={() => setParkReportConditions(p => active ? p.filter(x => x !== c.key) : [...p, c.key])} style={{
-                  padding: "8px 14px", borderRadius: 8,
-                  background: active ? C.primaryLight : C.bg,
-                  border: active ? `1.5px solid ${C.primary}` : `1px solid ${C.border}`,
-                  color: active ? C.primary : C.sub,
-                  fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: ff,
-                }}>{c.label}</button>
-              );
-            })}
-          </div>
-          <textarea value={parkReportText} onChange={e => setParkReportText(e.target.value)} placeholder="Add a note (optional)" rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, marginBottom: 12, boxSizing: "border-box", resize: "none" }}/>
           <button onClick={submitParkReport} disabled={parkReportLevel === null} style={{
             width: "100%", padding: 14, borderRadius: 12,
             background: parkReportLevel !== null ? C.primary : C.border,
             border: "none", color: parkReportLevel !== null ? "#fff" : C.muted,
             fontSize: 15, fontWeight: 700, cursor: parkReportLevel !== null ? "pointer" : "default", fontFamily: ff,
+            marginBottom: 8,
           }}>Submit Report</button>
+          <button onClick={() => setShowReportExtras(prev => !prev)} style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            width: "100%", padding: 10, background: "none", border: "none", cursor: "pointer", fontFamily: ff,
+          }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: C.sub }}>Add conditions or a note</span>
+            <span style={{ transform: showReportExtras ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s", color: C.sub }}>{Icons.ChevronDown(14)}</span>
+          </button>
+          {showReportExtras && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 8 }}>Conditions</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+                {CONDITIONS.map(c => {
+                  const active = parkReportConditions.includes(c.key);
+                  return (
+                    <button key={c.key} onClick={() => setParkReportConditions(p => active ? p.filter(x => x !== c.key) : [...p, c.key])} style={{
+                      padding: "8px 14px", borderRadius: 8,
+                      background: active ? C.primaryLight : C.bg,
+                      border: active ? `1.5px solid ${C.primary}` : `1px solid ${C.border}`,
+                      color: active ? C.primary : C.sub,
+                      fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: ff,
+                    }}>{c.label}</button>
+                  );
+                })}
+              </div>
+              <textarea value={parkReportText} onChange={e => setParkReportText(e.target.value)} placeholder="Add a note (optional)" rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, boxSizing: "border-box", resize: "none" }}/>
+            </div>
+          )}
         </div>
       </div>
       {/* Past reports */}
@@ -962,16 +957,15 @@ export default function CourtPulse() {
         <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 10 }}>Recent Reports</div>
         {reports.slice(0, 8).map(r => {
           const sc = r.stacks !== null ? getStackColor(r.stacks) : null;
+          const borderColor = sc ? sc.color : C.border;
+          const stackLabel = sc ? (r.stacks === 0 ? "Empty" : `${formatStacks(r.stacks)} stack${r.stacks !== 1 ? "s" : ""}`) : null;
           return (
-            <div key={r.id} style={{ ...s.card, padding: "12px 14px", display: "flex", alignItems: "flex-start", gap: 10 }}>
-              {sc && <div style={{ width: 32, height: 32, borderRadius: 8, background: sc.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, color: sc.color, flexShrink: 0 }}>{formatStacks(r.stacks)}</div>}
-              <div style={{ flex: 1 }}>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: C.text }}>{r.court ? `Court ${r.court}` : "Overall"} · {r.user}</span>
-                  <span style={{ fontSize: 10, color: C.muted }}>{r.time}</span>
-                </div>
-                {r.text && <div style={{ fontSize: 11, color: C.sub, marginTop: 2 }}>{r.text}</div>}
+            <div key={r.id} style={{ ...s.card, padding: "10px 14px", borderLeft: `4px solid ${borderColor}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{r.court ? `Court ${r.court}` : "Overall"}{stackLabel ? ` · ${stackLabel}` : ""} · {r.user}</span>
+                <span style={{ fontSize: 10, color: C.muted }}>{r.time}</span>
               </div>
+              {r.text && <div style={{ fontSize: 11, color: C.sub, marginTop: 2 }}>{r.text}</div>}
             </div>
           );
         })}
