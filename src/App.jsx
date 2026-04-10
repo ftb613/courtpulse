@@ -20,6 +20,8 @@ const C = {
   orangeLight: "#FFF0E0",
   red: "#E74C3C",
   redLight: "#FDECEB",
+  blue: "#4A9EBF",
+  blueLight: "#E3F2F8",
   chatSelf: "#2B6CB0",
   chatOther: "#FFFFFF",
   banner: "#1A3A5C",
@@ -35,24 +37,12 @@ const PARK = {
   mapsUrl: "https://maps.google.com/?q=Marine+Park+Pickleball+Courts+Brooklyn+NY",
 };
 
-const WEATHER = { temp: 68, icon: "sun", wind: "8 mph" };
-
-// ─── Hourly Forecast (today) ───
-const HOURLY_FORECAST = [
-  { hour: "Now", temp: 68, icon: "sun" },
-  { hour: "10a", temp: 70, icon: "sun" },
-  { hour: "11a", temp: 72, icon: "sun" },
-  { hour: "12p", temp: 74, icon: "partcloud" },
-  { hour: "1p", temp: 74, icon: "partcloud" },
-  { hour: "2p", temp: 73, icon: "cloud" },
-  { hour: "3p", temp: 71, icon: "cloud" },
-  { hour: "4p", temp: 68, icon: "rain" },
-  { hour: "5p", temp: 65, icon: "rain" },
-  { hour: "6p", temp: 63, icon: "cloud" },
-  { hour: "7p", temp: 60, icon: "cloud" },
+// ─── Hourly Forecast fallback ───
+const HOURLY_FALLBACK = [
+  { hour: "Now", temp: "--", icon: "sun" },
 ];
 
-// ─── Court Data (FIXED: 1,5=beginner left, 4,8=challenge right, rest=regular) ───
+// ─── Court Data (1,5=beginner left, 4,8=challenge right, rest=regular) ───
 const COURT_TYPES = {
   beginner: { label: "Beginner", sub: "4 on / 4 off", color: "#6C63FF" },
   regular: { label: "Regular", sub: "4 on / 4 off", color: C.primary },
@@ -60,17 +50,26 @@ const COURT_TYPES = {
 };
 
 const INIT_COURTS = [
-  { id: 1, type: "beginner", stacks: 0, conditions: [], lastReport: null, reporter: null },
-  { id: 2, type: "regular", stacks: 0, conditions: [], lastReport: null, reporter: null },
-  { id: 3, type: "regular", stacks: 0, conditions: [], lastReport: null, reporter: null },
-  { id: 4, type: "challenge", stacks: 0, conditions: [], lastReport: null, reporter: null },
-  { id: 5, type: "beginner", stacks: 0, conditions: [], lastReport: null, reporter: null },
-  { id: 6, type: "regular", stacks: 0, conditions: [], lastReport: null, reporter: null },
-  { id: 7, type: "regular", stacks: 0, conditions: [], lastReport: null, reporter: null },
-  { id: 8, type: "challenge", stacks: 0, conditions: [], lastReport: null, reporter: null },
+  { id: 1, type: "beginner", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
+  { id: 2, type: "regular", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
+  { id: 3, type: "regular", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
+  { id: 4, type: "challenge", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
+  { id: 5, type: "beginner", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
+  { id: 6, type: "regular", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
+  { id: 7, type: "regular", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
+  { id: 8, type: "challenge", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
 ];
 
-// (Demo data removed — loaded from Supabase)
+// ─── Park-level report → court mapping ───
+const PARK_LEVEL_MAP = [
+  { stacks: 0, playing: false },   // 0 = Empty
+  { stacks: 0, playing: true },    // 1 = Half Playing
+  { stacks: 0, playing: true },    // 2 = All Playing
+  { stacks: 0.5, playing: true },  // 3 = 1 Stack / Half
+  { stacks: 1, playing: true },    // 4 = 1 Stack / All
+  { stacks: 2, playing: true },    // 5 = 2+ Stacks
+];
+const FRESHNESS_MS = 30 * 60 * 1000; // 30 minutes
 
 // ─── AI Prediction Data (placeholder) ───
 const PREDICTED_TIMES = {
@@ -90,6 +89,15 @@ const CONDITIONS = [
   { key: "hot", label: "Hot" },
   { key: "great", label: "Great Conditions" },
 ];
+
+// ─── Level labels/colors for park-level reports ───
+const LEVEL_LABELS = ["Empty","Half Playing","All Playing","1 Stack / Half","1 Stack / All","2+ Stacks"];
+const LEVEL_COLORS = [C.green, C.yellow, C.orange, C.orange, C.red, C.red];
+
+// ─── Spam protection ───
+const SEND_COOLDOWN = 3000; // 3 seconds
+const MAX_MSG_LENGTH = 500;
+const MAX_STACKS = 15;
 
 // ─── Icons ───
 const Icons = {
@@ -137,7 +145,8 @@ const FontLoader = () => (
 );
 
 // ─── Helpers ───
-const getStackColor = (stacks) => {
+const getStackColor = (stacks, playing = false) => {
+  if (stacks === 0 && playing) return { bg: C.blueLight, color: C.blue, label: "Playing" };
   if (stacks === 0) return { bg: C.greenLight, color: C.green, label: "Empty" };
   if (stacks <= 1) return { bg: C.yellowLight, color: C.yellow, label: stacks === 0.5 ? "½ Stack" : "1 Stack" };
   if (stacks <= 2) return { bg: C.orangeLight, color: C.orange, label: `${stacks % 1 === 0.5 ? stacks : stacks} Stacks` };
@@ -145,7 +154,8 @@ const getStackColor = (stacks) => {
 };
 
 // v2-style court colors (fill + stroke)
-const COURT_COLOR = (stacks) => {
+const COURT_COLOR = (stacks, playing = false) => {
+  if (stacks === 0 && playing) return { fill: "#4A9EBF44", stroke: "#4A9EBF" };
   if (stacks === 0) return { fill: "#27AE6044", stroke: "#27AE60" };
   if (stacks <= 1) return { fill: "#E2A61244", stroke: "#E2A612" };
   if (stacks <= 2) return { fill: "#E67E2244", stroke: "#E67E22" };
@@ -155,6 +165,16 @@ const COURT_COLOR = (stacks) => {
 const formatStacks = (n) => {
   if (n === 0) return "0";
   return n.toString();
+};
+
+// Weather code → icon
+const weatherCodeToIcon = (code) => {
+  if (code <= 1) return "sun";
+  if (code === 2) return "partcloud";
+  if (code === 3 || code === 45 || code === 48) return "cloud";
+  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82) || code >= 95) return "rain";
+  if (code >= 71 && code <= 77) return "cloud";
+  return "sun";
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -174,6 +194,48 @@ export default function CourtPulse() {
   const [courtChats, setCourtChats] = useState({});
   const [chatInput, setChatInput] = useState("");
   const [courtChatInput, setCourtChatInput] = useState("");
+
+  // ─── Weather State (live from Open-Meteo) ───
+  const [hourlyWeather, setHourlyWeather] = useState(HOURLY_FALLBACK);
+  const [currentTemp, setCurrentTemp] = useState(null);
+  const [currentWeatherIcon, setCurrentWeatherIcon] = useState("sun");
+
+  // ─── Fetch live weather ───
+  useEffect(() => {
+    fetch("https://api.open-meteo.com/v1/forecast?latitude=40.6128&longitude=-73.9244&hourly=temperature_2m,weather_code&temperature_unit=fahrenheit&timezone=America/New_York&forecast_days=1")
+      .then(r => r.json())
+      .then(data => {
+        const now = new Date();
+        const currentHour = now.getHours();
+        const hourly = data.hourly;
+        if (!hourly?.time) return;
+        const mapped = [];
+        for (let i = 0; i < hourly.time.length; i++) {
+          const h = new Date(hourly.time[i]).getHours();
+          if (h < 8 || h > 20) continue; // only show 8am-8pm
+          const icon = weatherCodeToIcon(hourly.weather_code[i]);
+          let label;
+          if (h === currentHour) label = "Now";
+          else if (h < 12) label = `${h}a`;
+          else if (h === 12) label = "12p";
+          else label = `${h - 12}p`;
+          mapped.push({ hour: label, temp: Math.round(hourly.temperature_2m[i]), icon });
+        }
+        if (mapped.length > 0) {
+          setHourlyWeather(mapped);
+          // Find current hour's data
+          const nowEntry = mapped.find(m => m.hour === "Now");
+          if (nowEntry) {
+            setCurrentTemp(nowEntry.temp);
+            setCurrentWeatherIcon(nowEntry.icon);
+          } else {
+            setCurrentTemp(mapped[0].temp);
+            setCurrentWeatherIcon(mapped[0].icon);
+          }
+        }
+      })
+      .catch(() => {}); // keep fallback
+  }, []);
 
   // ─── Court UUID Map (court_number → UUID for Supabase writes) ───
   const courtUuidMap = useRef({});
@@ -195,7 +257,6 @@ export default function CourtPulse() {
         dbCourts.forEach(c => { map[c.court_number] = c.id; });
         courtUuidMap.current = map;
 
-        // Merge DB court types into local court state
         setCourts(prev => prev.map(c => {
           const db = dbCourts.find(d => d.court_number === c.id);
           return db ? { ...c, type: db.court_type } : c;
@@ -223,7 +284,7 @@ export default function CourtPulse() {
         }));
         setReports(mapped);
 
-        // Update court stacks from latest reports
+        // Update court stacks from latest direct court reports
         setCourts(prev => {
           const updated = [...prev];
           const latest = {};
@@ -232,20 +293,38 @@ export default function CourtPulse() {
               latest[r.courts.court_number] = r;
             }
           });
-          return updated.map(c => {
+          let result = updated.map(c => {
             const lr = latest[c.id];
             if (lr) {
               const mins = Math.round((Date.now() - new Date(lr.created_at).getTime()) / 60000);
               return {
                 ...c,
                 stacks: Number(lr.stacks) || 0,
+                playing: Number(lr.stacks) > 0,
                 conditions: lr.conditions || [],
                 lastReport: mins < 1 ? "Just now" : `${mins}m ago`,
+                lastReportAt: new Date(lr.created_at).getTime(),
                 reporter: lr.reporter_name || "Anonymous",
               };
             }
             return c;
           });
+
+          // Apply latest park-level report to courts without fresh direct reports
+          const latestParkReport = dbReports.find(r => !r.courts?.court_number && r.overall_level !== null && r.overall_level !== undefined);
+          if (latestParkReport) {
+            const mapping = PARK_LEVEL_MAP[latestParkReport.overall_level];
+            if (mapping) {
+              const now = Date.now();
+              result = result.map(c => {
+                const isFresh = c.lastReportAt && (now - c.lastReportAt < FRESHNESS_MS);
+                if (isFresh) return c;
+                return { ...c, stacks: mapping.stacks, playing: mapping.playing };
+              });
+            }
+          }
+
+          return result;
         });
       }
 
@@ -306,7 +385,6 @@ export default function CourtPulse() {
     // ─── Real-time subscriptions ───
     const channel = supabase.channel("courtpulse-realtime");
 
-    // Listen for new chat messages
     channel.on("postgres_changes", { event: "INSERT", schema: "public", table: "chat_messages", filter: "park_id=eq.marine-park" }, (payload) => {
       const m = payload.new;
       const msg = {
@@ -324,7 +402,6 @@ export default function CourtPulse() {
           return [...prev, msg];
         });
       } else {
-        // Find court_number from UUID
         const courtNum = Object.entries(courtUuidMap.current).find(([, uuid]) => uuid === m.court_id)?.[0];
         if (courtNum) {
           setCourtChats(prev => {
@@ -336,7 +413,6 @@ export default function CourtPulse() {
       }
     });
 
-    // Listen for chat message updates (flags, deletes)
     channel.on("postgres_changes", { event: "UPDATE", schema: "public", table: "chat_messages", filter: "park_id=eq.marine-park" }, (payload) => {
       const m = payload.new;
       const updater = (prev) => prev.map(p => p.id === m.id ? { ...p, flagged: m.flagged || false, deleted: m.deleted || false, text: m.deleted ? "" : p.text } : p);
@@ -350,10 +426,8 @@ export default function CourtPulse() {
       }
     });
 
-    // Listen for new reports
     channel.on("postgres_changes", { event: "INSERT", schema: "public", table: "reports", filter: "park_id=eq.marine-park" }, async (payload) => {
       const r = payload.new;
-      // Look up court number
       let courtNum = null;
       if (r.court_id) {
         courtNum = Number(Object.entries(courtUuidMap.current).find(([, uuid]) => uuid === r.court_id)?.[0]) || null;
@@ -373,12 +447,25 @@ export default function CourtPulse() {
         return [report, ...prev];
       });
 
-      // Update court status if court-specific
+      // Court-specific report → update that court directly
       if (courtNum && r.stacks !== null) {
         setCourts(prev => prev.map(c => c.id === courtNum
-          ? { ...c, stacks: Number(r.stacks), conditions: r.conditions || [], lastReport: "Just now", reporter: r.reporter_name || "Anonymous" }
+          ? { ...c, stacks: Number(r.stacks), playing: Number(r.stacks) > 0, conditions: r.conditions || [], lastReport: "Just now", lastReportAt: Date.now(), reporter: r.reporter_name || "Anonymous" }
           : c
         ));
+      }
+
+      // Park-level report → apply formula to stale courts
+      if (!r.court_id && r.overall_level !== null && r.overall_level !== undefined) {
+        const mapping = PARK_LEVEL_MAP[r.overall_level];
+        if (mapping) {
+          const now = Date.now();
+          setCourts(prev => prev.map(c => {
+            const isFresh = c.lastReportAt && (now - c.lastReportAt < FRESHNESS_MS);
+            if (isFresh) return c;
+            return { ...c, stacks: mapping.stacks, playing: mapping.playing };
+          }));
+        }
       }
     });
 
@@ -402,13 +489,13 @@ export default function CourtPulse() {
   const [toast, setToast] = useState(null);
   const [flagConfirm, setFlagConfirm] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
-  const [openMenu, setOpenMenu] = useState(null); // { msgId, chatType }
+  const [openMenu, setOpenMenu] = useState(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [showReportExtras, setShowReportExtras] = useState(false);
 
-  // Typing indicator simulation
   const [someoneTyping, setSomeoneTyping] = useState(false);
   const typingTimerRef = useRef(null);
+  const lastSendRef = useRef(0); // spam protection
 
   const chatEndRef = useRef(null);
   const courtChatEndRef = useRef(null);
@@ -423,10 +510,6 @@ export default function CourtPulse() {
     if (selectedCourt && courtChatEndRef.current) courtChatEndRef.current.scrollIntoView({ behavior: "smooth" });
   }, [selectedCourt, courtChats]);
 
-  // Typing indicator will be driven by Supabase presence in production
-  // (bot auto-reply removed)
-
-  // Scroll detection for scroll-to-bottom button
   const handleChatScroll = useCallback((e) => {
     const el = e.target;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
@@ -442,22 +525,28 @@ export default function CourtPulse() {
     setTimeout(() => setToast(null), 2500);
   };
 
-  // ─── Auth ───
-  const handleJoin = async () => {
+  // ─── Auth (FIXED: setUserName fires immediately) ───
+  const handleJoin = () => {
     if (!nameInput.trim()) return;
     const name = nameInput.trim();
     const contact = contactInput.trim() || null;
     try { localStorage.setItem("courtpulse_name", name); } catch {}
     try { if (contact) localStorage.setItem("courtpulse_contact", contact); } catch {}
-    // Save to Supabase users table
-    await supabase.from("users").insert({ name, contact }).catch(() => {});
     setUserName(name);
+    // Fire-and-forget DB insert
+    supabase.from("users").insert({ name, contact }).catch(() => {});
   };
 
-  // ─── Chat ───
+  // ─── Chat (with spam protection) ───
   const sendMainChat = useCallback(async () => {
     if (!chatInput.trim()) return;
-    const text = chatInput.trim();
+    const now = Date.now();
+    if (now - lastSendRef.current < SEND_COOLDOWN) {
+      showToast("Slow down! Wait a moment.");
+      return;
+    }
+    lastSendRef.current = now;
+    const text = chatInput.trim().slice(0, MAX_MSG_LENGTH);
     setChatInput("");
     const { error } = await supabase.from("chat_messages").insert({
       park_id: "marine-park",
@@ -470,7 +559,13 @@ export default function CourtPulse() {
 
   const sendCourtChat = useCallback(async () => {
     if (!courtChatInput.trim() || !selectedCourt) return;
-    const text = courtChatInput.trim();
+    const now = Date.now();
+    if (now - lastSendRef.current < SEND_COOLDOWN) {
+      showToast("Slow down! Wait a moment.");
+      return;
+    }
+    lastSendRef.current = now;
+    const text = courtChatInput.trim().slice(0, MAX_MSG_LENGTH);
     const courtUuid = courtUuidMap.current[selectedCourt];
     setCourtChatInput("");
     if (!courtUuid) return;
@@ -492,15 +587,13 @@ export default function CourtPulse() {
   const confirmFlag = async () => {
     if (!flagConfirm) return;
     const { msgId } = flagConfirm;
-    // Update chat_messages flagged status
     await supabase.from("chat_messages").update({ flagged: true, flagged_at: new Date().toISOString(), flagged_by: userName }).eq("id", msgId);
-    // Insert into message_flags
     await supabase.from("message_flags").insert({ message_id: msgId, flagged_by: userName, reason: "user_report" });
     setFlagConfirm(null);
     showToast("Message reported. Thank you.");
   };
 
-  // ─── Delete Message (for everyone) ───
+  // ─── Delete Message ───
   const handleDelete = (msgId, chatType) => {
     setDeleteConfirm({ msgId, chatType });
     setOpenMenu(null);
@@ -514,15 +607,14 @@ export default function CourtPulse() {
     showToast("Message deleted.");
   };
 
-  // ─── Court Report ───
+  // ─── Court Report (stacks capped at MAX_STACKS) ───
   const submitCourtReport = useCallback(async () => {
     if (reportStacks === null || !selectedCourt) return;
     const courtUuid = courtUuidMap.current[selectedCourt];
     if (!courtUuid) return;
 
-    // Optimistic UI update
     setCourts(p => p.map(c => c.id === selectedCourt
-      ? { ...c, stacks: reportStacks, conditions: reportConditions, lastReport: "Just now", reporter: "You" }
+      ? { ...c, stacks: reportStacks, playing: reportStacks > 0, conditions: reportConditions, lastReport: "Just now", lastReportAt: Date.now(), reporter: "You" }
       : c
     ));
 
@@ -544,20 +636,41 @@ export default function CourtPulse() {
     showToast("Report submitted!");
   }, [reportStacks, reportConditions, reportText, selectedCourt, userName]);
 
-  // ─── Park-Level Report ───
+  // ─── Park-Level Report (FIXED: allows comment/condition-only, applies formula) ───
   const submitParkReport = useCallback(async () => {
-    if (parkReportLevel === null) return;
+    const hasContent = parkReportLevel !== null || parkReportConditions.length > 0 || parkReportText.trim();
+    if (!hasContent) return;
+
     const levelLabels = ["Empty","Half Playing","All Playing","1 Stack / Half","1 Stack / All","2+ Stacks"];
+    let comment = parkReportText.trim() || null;
+    if (!comment && parkReportLevel !== null) {
+      comment = `Overall: ${levelLabels[parkReportLevel]}`;
+    }
+
     const { error } = await supabase.from("reports").insert({
       park_id: "marine-park",
       court_id: null,
       stacks: null,
       overall_level: parkReportLevel,
-      conditions: parkReportConditions,
-      comment: parkReportText || `Overall: ${levelLabels[parkReportLevel]}`,
+      conditions: parkReportConditions.length > 0 ? parkReportConditions : null,
+      comment,
       reporter_name: userName,
     });
     if (error) console.error("Park report error:", error);
+
+    // Apply formula to courts immediately (optimistic)
+    if (parkReportLevel !== null) {
+      const mapping = PARK_LEVEL_MAP[parkReportLevel];
+      if (mapping) {
+        const now = Date.now();
+        setCourts(prev => prev.map(c => {
+          const isFresh = c.lastReportAt && (now - c.lastReportAt < FRESHNESS_MS);
+          if (isFresh) return c;
+          return { ...c, stacks: mapping.stacks, playing: mapping.playing };
+        }));
+      }
+    }
+
     setParkReportLevel(null);
     setParkReportConditions([]);
     setParkReportText("");
@@ -576,6 +689,23 @@ export default function CourtPulse() {
   // ─── Last Report Time ───
   const lastReportTime = reports.length > 0 ? reports[0].time : null;
   const lastReportUser = reports.length > 0 ? reports[0].user : null;
+
+  // ─── Helper: get report display info (works for both court and park reports) ───
+  const getReportDisplay = (r) => {
+    let borderColor, displayLabel;
+    if (r.stacks !== null) {
+      const sc = getStackColor(r.stacks);
+      borderColor = sc.color;
+      displayLabel = r.stacks === 0 ? "Empty" : `${formatStacks(r.stacks)} stack${r.stacks !== 1 ? "s" : ""}`;
+    } else if (r.level !== null && r.level !== undefined) {
+      borderColor = LEVEL_COLORS[r.level] || C.border;
+      displayLabel = LEVEL_LABELS[r.level] || null;
+    } else {
+      borderColor = C.primary;
+      displayLabel = null;
+    }
+    return { borderColor, displayLabel };
+  };
 
   // ─── Styles ───
   const s = {
@@ -617,7 +747,7 @@ export default function CourtPulse() {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  // BANNER
+  // BANNER (uses live weather)
   // ═══════════════════════════════════════════════════════════════════════
   const banner = (
     <div style={{ background: `linear-gradient(135deg, ${C.banner} 0%, #264D73 100%)`, padding: "14px 18px 10px" }}>
@@ -637,8 +767,10 @@ export default function CourtPulse() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 5, background: "rgba(255,255,255,0.1)", padding: "5px 10px", borderRadius: 8 }}>
-            <span style={{ color: "#F0C040" }}>{Icons.Sun(14)}</span>
-            <span style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>{WEATHER.temp}°</span>
+            <span style={{ color: currentWeatherIcon === "rain" ? C.primary : currentWeatherIcon === "cloud" ? "#ccc" : "#F0C040" }}>
+              <WeatherIcon type={currentWeatherIcon} size={14} />
+            </span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>{currentTemp !== null ? `${currentTemp}°` : "--"}</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(255,255,255,0.1)", padding: "5px 10px", borderRadius: 8 }}>
             {Icons.Clock(12)}
@@ -657,7 +789,7 @@ export default function CourtPulse() {
   );
 
   // ═══════════════════════════════════════════════════════════════════════
-  // COURT MAP (v2 style — filled color rects with stroke)
+  // COURT MAP (v2 style — now with "Playing" blue color)
   // ═══════════════════════════════════════════════════════════════════════
   const courtMap = (() => {
     const w = 420, h = 270, cW = 90, cH = 100, gap = 10;
@@ -677,10 +809,8 @@ export default function CourtPulse() {
           <rect x="0" y="0" width={w} height={h} rx="14" fill="#2D5A27" opacity="0.08"/>
           <rect x="4" y="4" width={w-8} height={h-8} rx="12" fill="#3A7233" opacity="0.04"/>
 
-          {/* Net divider line only */}
           <line x1={startX-6} y1={topY+cH+15} x2={startX+cW*4+gap*3+6} y2={topY+cH+15} stroke="#5A6270" strokeWidth="1.5" strokeDasharray="8,5" opacity="0.18"/>
 
-          {/* Entrance */}
           <text x={w/2} y={h-5} textAnchor="middle" fontSize="8" fill="#5A6270" fontFamily={ff} opacity="0.45" fontWeight="600">ENTRANCE</text>
           <path d={`M${w/2-18} ${h-13} L${w/2} ${h-9} L${w/2+18} ${h-13}`} stroke="#5A6270" strokeWidth="1" fill="none" opacity="0.2"/>
 
@@ -688,7 +818,7 @@ export default function CourtPulse() {
             const court = courts.find(c => c.id === pos.id);
             const x = startX + pos.col * (cW + gap);
             const y = pos.row === 0 ? topY : botY;
-            const cc = COURT_COLOR(court.stacks);
+            const cc = COURT_COLOR(court.stacks, court.playing);
             const hasCond = court.conditions.length > 0;
             const typeLabel = court.type === "beginner" ? "BEGINNER" : court.type === "challenge" ? "CHALLENGE" : null;
             const typeColor = court.type === "beginner" ? "#6C63FF" : court.type === "challenge" ? "#D4540E" : null;
@@ -697,10 +827,8 @@ export default function CourtPulse() {
               <g key={court.id} onClick={() => setSelectedCourt(court.id)} style={{ cursor: "pointer" }}>
                 <rect x={x} y={y} width={cW} height={cH} rx="8" fill={cc.fill} stroke={cc.stroke} strokeWidth="2.5"/>
 
-                {/* Court number */}
                 <text x={x+cW/2} y={y+cH/2+(typeLabel ? 0 : 5)} textAnchor="middle" fontSize="20" fontWeight="800" fill={cc.stroke} fontFamily={ff}>{court.id}</text>
 
-                {/* Court type label for beginner/challenge */}
                 {typeLabel && (
                   <g>
                     <rect x={x+(cW-60)/2} y={y+cH/2+7} width={60} height={17} rx="5" fill={typeColor} opacity="0.15"/>
@@ -708,17 +836,17 @@ export default function CourtPulse() {
                   </g>
                 )}
 
-                {/* Condition dot */}
                 {hasCond && <circle cx={x+cW-9} cy={y+9} r="4.5" fill={C.yellow} stroke="#fff" strokeWidth="1.5"/>}
               </g>
             );
           })}
         </svg>
 
-        {/* Legend */}
-        <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 10, flexWrap: "wrap" }}>
+        {/* Legend (updated with Playing) */}
+        <div style={{ display: "flex", justifyContent: "center", gap: 14, marginTop: 10, flexWrap: "wrap" }}>
           {[
             { color: "#27AE60", label: "Empty" },
+            { color: "#4A9EBF", label: "Playing" },
             { color: "#E2A612", label: "≤1 Stack" },
             { color: "#E67E22", label: "2 Stacks" },
             { color: "#E74C3C", label: "3+ Stacks" },
@@ -730,7 +858,6 @@ export default function CourtPulse() {
           ))}
         </div>
 
-        {/* Last report timestamp */}
         {lastReportTime && (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginTop: 10 }}>
             <span style={{ color: C.sub }}>{Icons.Clock(13)}</span>
@@ -742,21 +869,21 @@ export default function CourtPulse() {
   })();
 
   // ═══════════════════════════════════════════════════════════════════════
-  // WEATHER WIDGET (full week)
+  // WEATHER WIDGET (live hourly from Open-Meteo)
   // ═══════════════════════════════════════════════════════════════════════
   const weatherWidget = (
     <div style={{ ...s.section }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 10 }}>Today's Weather</div>
       <div style={{ ...s.card, padding: "14px 0" }}>
         <div style={{ display: "flex", gap: 0, overflowX: "auto", padding: "0 14px", WebkitOverflowScrolling: "touch" }}>
-          {HOURLY_FORECAST.map((h, i) => (
+          {hourlyWeather.map((h, i) => (
             <div key={i} style={{
               display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
               minWidth: 56, padding: "6px 4px", borderRadius: 10,
-              background: i === 0 ? C.primaryLight : "transparent",
-              border: i === 0 ? `1.5px solid ${C.primary}33` : "1px solid transparent",
+              background: h.hour === "Now" ? C.primaryLight : "transparent",
+              border: h.hour === "Now" ? `1.5px solid ${C.primary}33` : "1px solid transparent",
             }}>
-              <span style={{ fontSize: 12, fontWeight: i === 0 ? 700 : 500, color: i === 0 ? C.primary : C.sub }}>{h.hour}</span>
+              <span style={{ fontSize: 12, fontWeight: h.hour === "Now" ? 700 : 500, color: h.hour === "Now" ? C.primary : C.sub }}>{h.hour}</span>
               <span style={{ color: h.icon === "rain" ? C.primary : h.icon === "cloud" ? C.muted : "#F0C040" }}>
                 <WeatherIcon type={h.icon} size={18} />
               </span>
@@ -817,24 +944,22 @@ export default function CourtPulse() {
   ) : null;
 
   // ═══════════════════════════════════════════════════════════════════════
-  // LATEST REPORTS
+  // LATEST REPORTS (FIXED: shows level label + correct color for park reports)
   // ═══════════════════════════════════════════════════════════════════════
   const latestReports = (
     <div style={{ ...s.section }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 10 }}>Latest Reports</div>
       {reports.slice(0, 5).map(r => {
-        const sc = r.stacks !== null ? getStackColor(r.stacks) : null;
-        const borderColor = sc ? sc.color : C.border;
-        const stackLabel = sc ? (r.stacks === 0 ? "Empty" : `${formatStacks(r.stacks)} stack${r.stacks !== 1 ? "s" : ""}`) : null;
+        const { borderColor, displayLabel } = getReportDisplay(r);
         return (
           <div key={r.id} style={{ ...s.card, padding: "10px 14px", borderLeft: `4px solid ${borderColor}` }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>
-                {r.court ? `Court ${r.court}` : "Overall"}{stackLabel ? ` · ${stackLabel}` : ""}{r.user ? ` · ${r.user}` : ""}
+                {r.court ? `Court ${r.court}` : "Overall"}{displayLabel ? ` · ${displayLabel}` : ""}{r.user ? ` · ${r.user}` : ""}
               </span>
               <span style={{ fontSize: 11, color: C.muted }}>{r.time}</span>
             </div>
-            {r.text && <div style={{ fontSize: 12, color: C.sub, marginTop: 3 }}>{r.text}</div>}
+            {r.text && <div style={{ fontSize: 12, color: C.sub, marginTop: 3, wordBreak: "break-word", overflowWrap: "break-word" }}>{r.text}</div>}
             {r.conditions?.length > 0 && (
               <div style={{ display: "flex", gap: 4, marginTop: 5 }}>
                 {r.conditions.map(c => (
@@ -875,7 +1000,7 @@ export default function CourtPulse() {
   );
 
   // ═══════════════════════════════════════════════════════════════════════
-  // REPORT TAB (park-level)
+  // REPORT TAB (FIXED: comment-only allowed, correct recent reports display)
   // ═══════════════════════════════════════════════════════════════════════
   const OVERALL_LEVELS = [
     { key: "empty", label: "Empty", desc: "No one playing", color: C.green },
@@ -885,6 +1010,8 @@ export default function CourtPulse() {
     { key: "1-stack-all", label: "1 Stack / All", desc: "1 stack waiting at every court", color: C.red },
     { key: "2-stack", label: "2+ Stacks", desc: "2 or more stacks deep", color: C.red },
   ];
+
+  const parkReportHasContent = parkReportLevel !== null || parkReportConditions.length > 0 || parkReportText.trim();
 
   const reportScreen = (
     <div style={{ paddingBottom: 90 }}>
@@ -897,7 +1024,7 @@ export default function CourtPulse() {
             {OVERALL_LEVELS.map((lvl, i) => {
               const selected = parkReportLevel === i;
               return (
-                <button key={lvl.key} onClick={() => setParkReportLevel(i)} style={{
+                <button key={lvl.key} onClick={() => setParkReportLevel(prev => prev === i ? null : i)} style={{
                   display: "flex", alignItems: "center", justifyContent: "space-between",
                   padding: "12px 14px", borderRadius: 10,
                   background: selected ? lvl.color : `${lvl.color}12`,
@@ -916,11 +1043,11 @@ export default function CourtPulse() {
               );
             })}
           </div>
-          <button onClick={submitParkReport} disabled={parkReportLevel === null} style={{
+          <button onClick={submitParkReport} disabled={!parkReportHasContent} style={{
             width: "100%", padding: 14, borderRadius: 12,
-            background: parkReportLevel !== null ? C.primary : C.border,
-            border: "none", color: parkReportLevel !== null ? "#fff" : C.muted,
-            fontSize: 15, fontWeight: 700, cursor: parkReportLevel !== null ? "pointer" : "default", fontFamily: ff,
+            background: parkReportHasContent ? C.primary : C.border,
+            border: "none", color: parkReportHasContent ? "#fff" : C.muted,
+            fontSize: 15, fontWeight: 700, cursor: parkReportHasContent ? "pointer" : "default", fontFamily: ff,
             marginBottom: 8,
           }}>Submit Report</button>
           <button onClick={() => setShowReportExtras(prev => !prev)} style={{
@@ -947,25 +1074,30 @@ export default function CourtPulse() {
                   );
                 })}
               </div>
-              <textarea value={parkReportText} onChange={e => setParkReportText(e.target.value)} placeholder="Add a note (optional)" rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, boxSizing: "border-box", resize: "none" }}/>
+              <textarea value={parkReportText} onChange={e => setParkReportText(e.target.value)} placeholder="Add a note (optional)" rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, boxSizing: "border-box", resize: "none", wordBreak: "break-word", overflowWrap: "break-word" }}/>
             </div>
           )}
         </div>
       </div>
-      {/* Past reports */}
+      {/* Past reports (FIXED: correct colors + labels) */}
       <div style={{ ...s.section }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 10 }}>Recent Reports</div>
         {reports.slice(0, 8).map(r => {
-          const sc = r.stacks !== null ? getStackColor(r.stacks) : null;
-          const borderColor = sc ? sc.color : C.border;
-          const stackLabel = sc ? (r.stacks === 0 ? "Empty" : `${formatStacks(r.stacks)} stack${r.stacks !== 1 ? "s" : ""}`) : null;
+          const { borderColor, displayLabel } = getReportDisplay(r);
           return (
             <div key={r.id} style={{ ...s.card, padding: "10px 14px", borderLeft: `4px solid ${borderColor}` }}>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{r.court ? `Court ${r.court}` : "Overall"}{stackLabel ? ` · ${stackLabel}` : ""} · {r.user}</span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{r.court ? `Court ${r.court}` : "Overall"}{displayLabel ? ` · ${displayLabel}` : ""} · {r.user}</span>
                 <span style={{ fontSize: 10, color: C.muted }}>{r.time}</span>
               </div>
-              {r.text && <div style={{ fontSize: 11, color: C.sub, marginTop: 2 }}>{r.text}</div>}
+              {r.text && <div style={{ fontSize: 11, color: C.sub, marginTop: 2, wordBreak: "break-word", overflowWrap: "break-word" }}>{r.text}</div>}
+              {r.conditions?.length > 0 && (
+                <div style={{ display: "flex", gap: 4, marginTop: 5, flexWrap: "wrap" }}>
+                  {r.conditions.map(c => (
+                    <span key={c} style={{ fontSize: 10, background: C.yellowLight, color: C.yellow, padding: "2px 6px", borderRadius: 4, fontWeight: 600 }}>{c}</span>
+                  ))}
+                </div>
+              )}
             </div>
           );
         })}
@@ -974,12 +1106,11 @@ export default function CourtPulse() {
   );
 
   // ═══════════════════════════════════════════════════════════════════════
-  // CHAT BUBBLE (with 3-dot menu)
+  // CHAT BUBBLE (FIXED: word wrap + maxLength)
   // ═══════════════════════════════════════════════════════════════════════
   const chatBubble = (msg, chatType) => {
     const isMenuOpen = openMenu?.msgId === msg.id && openMenu?.chatType === chatType;
 
-    // Deleted message placeholder (WhatsApp-style)
     if (msg.deleted) {
       return (
         <div key={msg.id} style={{ display: "flex", flexDirection: msg.self ? "row-reverse" : "row", gap: 6, marginBottom: 6, alignItems: "flex-end" }}>
@@ -1007,11 +1138,12 @@ export default function CourtPulse() {
               color: msg.self ? "#fff" : C.text,
               fontSize: 14, lineHeight: 1.4,
               border: msg.self ? "none" : `1px solid ${C.border}`,
+              wordBreak: "break-word",
+              overflowWrap: "break-word",
             }}>
               {msg.flagged ? <span style={{ fontStyle: "italic", opacity: 0.5 }}>This message has been reported</span> : msg.text}
             </div>
 
-            {/* 3-dot menu button */}
             {!msg.flagged && (
               <div style={{ position: "relative", flexShrink: 0, alignSelf: "center" }}>
                 <button onClick={(e) => { e.stopPropagation(); setOpenMenu(isMenuOpen ? null : { msgId: msg.id, chatType }); }}
@@ -1019,7 +1151,6 @@ export default function CourtPulse() {
                   {Icons.Dots(14)}
                 </button>
 
-                {/* Dropdown menu */}
                 {isMenuOpen && (
                   <div style={{
                     position: "absolute", top: 28, [msg.self ? "right" : "left"]: 0,
@@ -1057,18 +1188,9 @@ export default function CourtPulse() {
   const typingIndicator = someoneTyping ? (
     <div style={{ display: "flex", gap: 6, marginBottom: 6, alignItems: "flex-end" }}>
       <div>
-        <div style={{ fontSize: 11, fontWeight: 700, color: C.sub, marginBottom: 2, paddingLeft: 4 }}>Mike T.</div>
-        <div style={{
-          padding: "12px 18px", borderRadius: "16px 16px 16px 4px",
-          background: C.chatOther, border: `1px solid ${C.border}`,
-          display: "flex", gap: 4, alignItems: "center",
-        }}>
+        <div style={{ padding: "12px 18px", borderRadius: "16px 16px 16px 4px", background: C.chatOther, border: `1px solid ${C.border}`, display: "flex", gap: 4, alignItems: "center" }}>
           {[0, 1, 2].map(i => (
-            <div key={i} style={{
-              width: 7, height: 7, borderRadius: "50%", background: C.muted,
-              animation: `typingBounce 1.2s ease-in-out infinite`,
-              animationDelay: `${i * 0.15}s`,
-            }}/>
+            <div key={i} style={{ width: 7, height: 7, borderRadius: "50%", background: C.muted, animation: `typingBounce 1.2s ease-in-out infinite`, animationDelay: `${i * 0.15}s` }}/>
           ))}
         </div>
       </div>
@@ -1076,7 +1198,7 @@ export default function CourtPulse() {
   ) : null;
 
   // ═══════════════════════════════════════════════════════════════════════
-  // CHAT SCREEN
+  // CHAT SCREEN (with spam protection + word wrap)
   // ═══════════════════════════════════════════════════════════════════════
   const chatScreen = (
     <div style={{ paddingBottom: 90, display: "flex", flexDirection: "column", height: "100vh" }}>
@@ -1090,7 +1212,6 @@ export default function CourtPulse() {
         {typingIndicator}
         <div ref={chatEndRef}/>
 
-        {/* Scroll to bottom button */}
         {showScrollBtn && (
           <button onClick={scrollToBottom} style={{
             position: "sticky", bottom: 8, left: "50%", transform: "translateX(-50%)",
@@ -1105,7 +1226,7 @@ export default function CourtPulse() {
         )}
       </div>
       <div style={{ padding: "8px 16px", borderTop: `1px solid ${C.border}`, background: C.card, display: "flex", gap: 8, alignItems: "center" }}>
-        <input value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === "Enter" && sendMainChat()} placeholder="Message..." style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, outline: "none" }}/>
+        <input value={chatInput} onChange={e => setChatInput(e.target.value.slice(0, MAX_MSG_LENGTH))} onKeyDown={e => e.key === "Enter" && sendMainChat()} placeholder="Message..." maxLength={MAX_MSG_LENGTH} style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, outline: "none" }}/>
         <button onClick={sendMainChat} style={{ width: 38, height: 38, borderRadius: 19, background: chatInput.trim() ? C.primary : C.border, border: "none", cursor: chatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: chatInput.trim() ? "#fff" : C.muted, flexShrink: 0 }}>
           {Icons.Send(18)}
         </button>
@@ -1114,13 +1235,13 @@ export default function CourtPulse() {
   );
 
   // ═══════════════════════════════════════════════════════════════════════
-  // COURT DETAIL (tap from map)
+  // COURT DETAIL (stacks capped at MAX_STACKS, word wrap on chat)
   // ═══════════════════════════════════════════════════════════════════════
   const courtDetail = (() => {
     if (!selectedCourt) return null;
     const court = courts.find(c => c.id === selectedCourt);
     const type = COURT_TYPES[court.type];
-    const sc = getStackColor(court.stacks);
+    const sc = getStackColor(court.stacks, court.playing);
     const courtMessages = courtChats[selectedCourt] || [];
 
     const courtReportModal = showCourtReport ? (
@@ -1136,17 +1257,18 @@ export default function CourtPulse() {
               {Icons.Minus(20)}
             </button>
             <div style={{ minWidth: 70, textAlign: "center" }}>
-              <div style={{ fontSize: 36, fontWeight: 900, color: sc.color, fontFamily: "'Fraunces', serif" }}>{formatStacks(reportStacks)}</div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: sc.color, marginTop: -2 }}>{getStackColor(reportStacks).label}</div>
+              <div style={{ fontSize: 36, fontWeight: 900, color: getStackColor(reportStacks).color, fontFamily: "'Fraunces', serif" }}>{formatStacks(reportStacks)}</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: getStackColor(reportStacks).color, marginTop: -2 }}>{getStackColor(reportStacks).label}</div>
             </div>
-            <button onClick={() => setReportStacks(reportStacks + 1)} style={{ width: 44, height: 44, borderRadius: 12, background: C.bg, border: `1px solid ${C.border}`, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: C.sub }}>
+            <button onClick={() => setReportStacks(Math.min(MAX_STACKS, reportStacks + 1))} style={{ width: 44, height: 44, borderRadius: 12, background: reportStacks >= MAX_STACKS ? "#f0f0f0" : C.bg, border: `1px solid ${C.border}`, cursor: reportStacks >= MAX_STACKS ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: reportStacks >= MAX_STACKS ? C.border : C.sub }}>
               {Icons.Plus(20)}
             </button>
           </div>
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}>
             <button onClick={() => setReportStacks(prev => {
               const hasHalf = prev % 1 === 0.5;
-              return hasHalf ? Math.floor(prev) : prev + 0.5;
+              if (hasHalf) return Math.floor(prev);
+              return Math.min(MAX_STACKS, prev + 0.5);
             })} style={{
               padding: "6px 18px", borderRadius: 8,
               background: reportStacks % 1 === 0.5 ? C.primaryLight : C.bg,
@@ -1174,7 +1296,7 @@ export default function CourtPulse() {
             })}
           </div>
 
-          <textarea value={reportText} onChange={e => setReportText(e.target.value)} placeholder="Add a note (optional)" rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, marginBottom: 12, boxSizing: "border-box", resize: "none" }}/>
+          <textarea value={reportText} onChange={e => setReportText(e.target.value)} placeholder="Add a note (optional)" rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, marginBottom: 12, boxSizing: "border-box", resize: "none", wordBreak: "break-word", overflowWrap: "break-word" }}/>
 
           <div style={{ display: "flex", gap: 10 }}>
             <button onClick={() => { setShowCourtReport(false); setReportStacks(0); setReportConditions([]); setReportText(""); }} style={{ flex: 1, padding: 14, borderRadius: 12, background: C.bg, border: `1px solid ${C.border}`, color: C.sub, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: ff }}>Cancel</button>
@@ -1203,7 +1325,7 @@ export default function CourtPulse() {
         <div style={{ padding: "12px 16px" }}>
           <div style={{ ...s.card, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px" }}>
             <div>
-              <div style={{ fontSize: 24, fontWeight: 900, color: sc.color, fontFamily: "'Fraunces', serif" }}>{formatStacks(court.stacks)} {court.stacks === 1 ? "Stack" : "Stacks"}</div>
+              <div style={{ fontSize: 24, fontWeight: 900, color: sc.color, fontFamily: "'Fraunces', serif" }}>{court.stacks === 0 && court.playing ? "Playing" : `${formatStacks(court.stacks)} ${court.stacks === 1 ? "Stack" : "Stacks"}`}</div>
               {court.lastReport && <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>Reported {court.lastReport} by {court.reporter}</div>}
             </div>
             <button onClick={() => setShowCourtReport(true)} style={{ padding: "10px 18px", borderRadius: 10, background: C.primary, border: "none", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: ff }}>
@@ -1219,7 +1341,7 @@ export default function CourtPulse() {
         </div>
 
         <div style={{ padding: "8px 16px env(safe-area-inset-bottom, 8px)", borderTop: `1px solid ${C.border}`, background: C.card, display: "flex", gap: 8, alignItems: "center" }}>
-          <input value={courtChatInput} onChange={e => setCourtChatInput(e.target.value)} onKeyDown={e => e.key === "Enter" && sendCourtChat()} placeholder={`Message Court ${selectedCourt}...`} style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, outline: "none" }}/>
+          <input value={courtChatInput} onChange={e => setCourtChatInput(e.target.value.slice(0, MAX_MSG_LENGTH))} onKeyDown={e => e.key === "Enter" && sendCourtChat()} placeholder={`Message Court ${selectedCourt}...`} maxLength={MAX_MSG_LENGTH} style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, outline: "none" }}/>
           <button onClick={sendCourtChat} style={{ width: 38, height: 38, borderRadius: 19, background: courtChatInput.trim() ? C.primary : C.border, border: "none", cursor: courtChatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: courtChatInput.trim() ? "#fff" : C.muted, flexShrink: 0 }}>
             {Icons.Send(18)}
           </button>
