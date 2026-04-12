@@ -69,7 +69,7 @@ const PARK_LEVEL_MAP = [
   { stacks: 1, playing: true },    // 4 = 1 Stack / All
   { stacks: 2, playing: true },    // 5 = 2+ Stacks
 ];
-const FRESHNESS_MS = 30 * 60 * 1000; // 30 minutes
+const FRESHNESS_MS = 30 * 60 * 1000; // fallback default
 
 // ─── AI Prediction Data (placeholder) ───
 const PREDICTED_TIMES = {
@@ -92,12 +92,24 @@ const CONDITIONS = [
 
 // ─── Level labels/colors for park-level reports ───
 const LEVEL_LABELS = ["Empty","Half Playing","All Playing","1 Stack / Half","1 Stack / All","2+ Stacks"];
-const LEVEL_COLORS = [C.green, C.yellow, C.orange, C.orange, C.red, C.red];
+const LEVEL_COLORS = [C.green, C.yellow, C.blue, C.orange, C.red, C.red];
 
 // ─── Spam protection ───
 const SEND_COOLDOWN = 3000; // 3 seconds
-const MAX_MSG_LENGTH = 500;
+const MAX_MSG_LENGTH = 1000;
 const MAX_STACKS = 15;
+const FLAG_THRESHOLD = 3; // auto-hide after this many unique flags
+
+// ─── Freshness windows (ms) based on stacks ───
+const getFreshnessMs = (stacks) => {
+  if (stacks <= 0) return 30 * 60 * 1000;
+  if (stacks <= 1) return 45 * 60 * 1000;
+  if (stacks <= 2) return 60 * 60 * 1000;
+  if (stacks <= 3) return 75 * 60 * 1000;
+  if (stacks <= 4) return 90 * 60 * 1000;
+  if (stacks <= 5) return 105 * 60 * 1000;
+  return 120 * 60 * 1000; // 6+ stacks
+};
 
 // ─── Icons ───
 const Icons = {
@@ -141,8 +153,23 @@ const FontLoader = () => (
       0%, 60%, 100% { transform: translateY(0); }
       30% { transform: translateY(-4px); }
     }
+    @keyframes shimmer { 0% { opacity: 0.4; } 50% { opacity: 0.7; } 100% { opacity: 0.4; } }
+    textarea { font-family: inherit; }
   `}</style>
 );
+
+// ─── Linkify: auto-detect URLs and make them tappable ───
+const Linkify = ({ text, color = C.primary }) => {
+  const urlPattern = /(https?:\/\/[^\s]+)/g;
+  const parts = text.split(urlPattern);
+  return parts.map((part, i) =>
+    /^https?:\/\//.test(part) ? (
+      <a key={i} href={part} target="_blank" rel="noopener noreferrer"
+        style={{ color, textDecoration: "underline", wordBreak: "break-all" }}
+        onClick={e => e.stopPropagation()}>{part}</a>
+    ) : <span key={i}>{part}</span>
+  );
+};
 
 // ─── Helpers ───
 const getStackColor = (stacks, playing = false) => {
@@ -194,6 +221,11 @@ export default function CourtPulse() {
   const [courtChats, setCourtChats] = useState({});
   const [chatInput, setChatInput] = useState("");
   const [courtChatInput, setCourtChatInput] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [unreadChat, setUnreadChat] = useState(false);
+  const [chatFocused, setChatFocused] = useState(false);
+  const [parkReportAt, setParkReportAt] = useState(null); // timestamp of latest park report
+  const [parkReportUser, setParkReportUser] = useState(null);
 
   // ─── Weather State (live from Open-Meteo) ───
   const [hourlyWeather, setHourlyWeather] = useState(HOURLY_FALLBACK);
@@ -284,6 +316,13 @@ export default function CourtPulse() {
         }));
         setReports(mapped);
 
+        // Track latest park report timestamp
+        const latestParkReport = dbReports.find(r => !r.courts?.court_number && r.overall_level !== null && r.overall_level !== undefined);
+        if (latestParkReport) {
+          setParkReportAt(new Date(latestParkReport.created_at).getTime());
+          setParkReportUser(latestParkReport.reporter_name || "Anonymous");
+        }
+
         // Update court stacks from latest direct court reports
         setCourts(prev => {
           const updated = [...prev];
@@ -311,13 +350,13 @@ export default function CourtPulse() {
           });
 
           // Apply latest park-level report to courts without fresh direct reports
-          const latestParkReport = dbReports.find(r => !r.courts?.court_number && r.overall_level !== null && r.overall_level !== undefined);
           if (latestParkReport) {
             const mapping = PARK_LEVEL_MAP[latestParkReport.overall_level];
             if (mapping) {
               const now = Date.now();
               result = result.map(c => {
-                const isFresh = c.lastReportAt && (now - c.lastReportAt < FRESHNESS_MS);
+                const freshMs = getFreshnessMs(c.stacks);
+                const isFresh = c.lastReportAt && (now - c.lastReportAt < freshMs);
                 if (isFresh) return c;
                 return { ...c, stacks: mapping.stacks, playing: mapping.playing };
               });
@@ -345,7 +384,9 @@ export default function CourtPulse() {
           time: new Date(m.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
           self: m.user_name === userName,
           flagged: m.flagged || false,
+          flag_count: m.flag_count || 0,
           deleted: m.deleted || false,
+          isSystem: m.is_system || false,
         })));
       }
 
@@ -372,12 +413,16 @@ export default function CourtPulse() {
               time: new Date(m.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
               self: m.user_name === userName,
               flagged: m.flagged || false,
+              flag_count: m.flag_count || 0,
               deleted: m.deleted || false,
+              isSystem: m.is_system || false,
             });
           }
         });
         setCourtChats(grouped);
       }
+
+      if (!cancelled) setLoading(false);
     };
 
     if (userName) loadData();
@@ -394,13 +439,19 @@ export default function CourtPulse() {
         time: new Date(m.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
         self: m.user_name === userName,
         flagged: m.flagged || false,
+        flag_count: m.flag_count || 0,
         deleted: m.deleted || false,
+        isSystem: m.is_system || false,
       };
       if (!m.court_id) {
         setMainChat(prev => {
           if (prev.some(p => p.id === m.id)) return prev;
           return [...prev, msg];
         });
+        // Set unread dot if not currently on chat tab
+        if (m.user_name !== userName) {
+          setUnreadChat(prev => true);
+        }
       } else {
         const courtNum = Object.entries(courtUuidMap.current).find(([, uuid]) => uuid === m.court_id)?.[0];
         if (courtNum) {
@@ -415,7 +466,8 @@ export default function CourtPulse() {
 
     channel.on("postgres_changes", { event: "UPDATE", schema: "public", table: "chat_messages", filter: "park_id=eq.marine-park" }, (payload) => {
       const m = payload.new;
-      const updater = (prev) => prev.map(p => p.id === m.id ? { ...p, flagged: m.flagged || false, deleted: m.deleted || false, text: m.deleted ? "" : p.text } : p);
+      const autoHidden = (m.flag_count || 0) >= FLAG_THRESHOLD;
+      const updater = (prev) => prev.map(p => p.id === m.id ? { ...p, flagged: m.flagged || false, flag_count: m.flag_count || 0, deleted: m.deleted || autoHidden || false, text: (m.deleted || autoHidden) ? "" : p.text } : p);
       if (!m.court_id) {
         setMainChat(updater);
       } else {
@@ -457,11 +509,14 @@ export default function CourtPulse() {
 
       // Park-level report → apply formula to stale courts
       if (!r.court_id && r.overall_level !== null && r.overall_level !== undefined) {
+        setParkReportAt(Date.now());
+        setParkReportUser(r.reporter_name || "Anonymous");
         const mapping = PARK_LEVEL_MAP[r.overall_level];
         if (mapping) {
           const now = Date.now();
           setCourts(prev => prev.map(c => {
-            const isFresh = c.lastReportAt && (now - c.lastReportAt < FRESHNESS_MS);
+            const freshMs = getFreshnessMs(c.stacks);
+            const isFresh = c.lastReportAt && (now - c.lastReportAt < freshMs);
             if (isFresh) return c;
             return { ...c, stacks: mapping.stacks, playing: mapping.playing };
           }));
@@ -471,9 +526,31 @@ export default function CourtPulse() {
 
     channel.subscribe();
 
+    // ─── Typing Presence ───
+    const typingChannel = supabase.channel('typing-marine-park', {
+      config: { presence: { key: userName } },
+    });
+    typingChannelRef.current = typingChannel;
+
+    typingChannel.on('presence', { event: 'sync' }, () => {
+      const state = typingChannel.presenceState();
+      const anyoneElseTyping = Object.entries(state).some(([key, presences]) =>
+        key !== userName && presences.some(p => p.typing === true)
+      );
+      setSomeoneTyping(anyoneElseTyping);
+    });
+
+    typingChannel.subscribe(async (status) => {
+      if (status === 'SUBSCRIBED') {
+        await typingChannel.track({ typing: false });
+      }
+    });
+
     return () => {
       cancelled = true;
       supabase.removeChannel(channel);
+      supabase.removeChannel(typingChannel);
+      typingChannelRef.current = null;
     };
   }, [userName]);
 
@@ -495,15 +572,20 @@ export default function CourtPulse() {
 
   const [someoneTyping, setSomeoneTyping] = useState(false);
   const typingTimerRef = useRef(null);
+  const typingChannelRef = useRef(null);
   const lastSendRef = useRef(0); // spam protection
 
   const chatEndRef = useRef(null);
   const courtChatEndRef = useRef(null);
   const chatScrollRef = useRef(null);
+  const chatTextareaRef = useRef(null);
 
   // ─── Effects ───
   useEffect(() => {
-    if (tab === "chat" && chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+    if (tab === "chat") {
+      setUnreadChat(false);
+      if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
   }, [tab, mainChat]);
 
   useEffect(() => {
@@ -518,6 +600,15 @@ export default function CourtPulse() {
 
   const scrollToBottom = useCallback(() => {
     if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+  }, []);
+
+  const broadcastTyping = useCallback(() => {
+    if (!typingChannelRef.current) return;
+    typingChannelRef.current.track({ typing: true });
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    typingTimerRef.current = setTimeout(() => {
+      if (typingChannelRef.current) typingChannelRef.current.track({ typing: false });
+    }, 3000);
   }, []);
 
   const showToast = (msg) => {
@@ -548,6 +639,8 @@ export default function CourtPulse() {
     lastSendRef.current = now;
     const text = chatInput.trim().slice(0, MAX_MSG_LENGTH);
     setChatInput("");
+    if (typingChannelRef.current) typingChannelRef.current.track({ typing: false });
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
     const { error } = await supabase.from("chat_messages").insert({
       park_id: "marine-park",
       court_id: null,
@@ -587,8 +680,17 @@ export default function CourtPulse() {
   const confirmFlag = async () => {
     if (!flagConfirm) return;
     const { msgId } = flagConfirm;
-    await supabase.from("chat_messages").update({ flagged: true, flagged_at: new Date().toISOString(), flagged_by: userName }).eq("id", msgId);
+    // Insert flag record
     await supabase.from("message_flags").insert({ message_id: msgId, flagged_by: userName, reason: "user_report" });
+    // Increment flag_count on the message (RPC or manual increment)
+    const { data: flagCount } = await supabase.from("message_flags").select("id").eq("message_id", msgId);
+    const count = flagCount?.length || 1;
+    const updates = { flagged: true, flagged_at: new Date().toISOString(), flag_count: count };
+    if (count >= FLAG_THRESHOLD) {
+      updates.deleted = true;
+      updates.deleted_at = new Date().toISOString();
+    }
+    await supabase.from("chat_messages").update(updates).eq("id", msgId);
     setFlagConfirm(null);
     showToast("Message reported. Thank you.");
   };
@@ -629,6 +731,18 @@ export default function CourtPulse() {
     });
 
     if (error) console.error("Report submit error:", error);
+
+    // Send system message to court chat
+    const sc = getStackColor(reportStacks);
+    const systemText = reportStacks === 0 ? `${userName} reported: Empty` : `${userName} reported: ${formatStacks(reportStacks)} ${reportStacks === 1 ? "stack" : "stacks"}`;
+    await supabase.from("chat_messages").insert({
+      park_id: "marine-park",
+      court_id: courtUuid,
+      user_name: "System",
+      text: systemText,
+      is_system: true,
+    }).catch(() => {});
+
     setShowCourtReport(false);
     setReportStacks(0);
     setReportConditions([]);
@@ -660,11 +774,14 @@ export default function CourtPulse() {
 
     // Apply formula to courts immediately (optimistic)
     if (parkReportLevel !== null) {
+      setParkReportAt(Date.now());
+      setParkReportUser(userName);
       const mapping = PARK_LEVEL_MAP[parkReportLevel];
       if (mapping) {
         const now = Date.now();
         setCourts(prev => prev.map(c => {
-          const isFresh = c.lastReportAt && (now - c.lastReportAt < FRESHNESS_MS);
+          const freshMs = getFreshnessMs(c.stacks);
+          const isFresh = c.lastReportAt && (now - c.lastReportAt < freshMs);
           if (isFresh) return c;
           return { ...c, stacks: mapping.stacks, playing: mapping.playing };
         }));
@@ -686,9 +803,48 @@ export default function CourtPulse() {
     }
   }, [openMenu]);
 
-  // ─── Last Report Time ───
+  // ─── Last Report Time (smart: uses court-specific or park report) ───
   const lastReportTime = reports.length > 0 ? reports[0].time : null;
   const lastReportUser = reports.length > 0 ? reports[0].user : null;
+
+  // ─── Court freshness helper ───
+  const getCourtFreshness = (court) => {
+    const now = Date.now();
+    const freshMs = getFreshnessMs(court.stacks);
+    if (court.lastReportAt) {
+      const age = now - court.lastReportAt;
+      if (age < freshMs) return 1; // fully fresh
+      return 0.4; // stale → faded
+    }
+    // Check park report
+    if (parkReportAt) {
+      const parkAge = now - parkReportAt;
+      if (parkAge < 30 * 60 * 1000) return 1; // park report within 30 min
+      return 0.4;
+    }
+    return 1; // no data = show default (which is empty/green)
+  };
+
+  // ─── Court timestamp helper ───
+  const getCourtTimestamp = (court) => {
+    const now = Date.now();
+    const freshMs = getFreshnessMs(court.stacks);
+    if (court.lastReportAt) {
+      const age = now - court.lastReportAt;
+      if (age < freshMs) {
+        return { text: `Reported ${court.lastReport} by ${court.reporter}`, source: "court" };
+      }
+    }
+    // Fall back to park report if fresher
+    if (parkReportAt) {
+      const parkAge = now - parkReportAt;
+      const parkMins = Math.round(parkAge / 60000);
+      if (parkAge < 60 * 60 * 1000) { // park report within 60 min
+        return { text: `Updated ${parkMins < 1 ? "just now" : `${parkMins}m ago`} via park report`, source: "park" };
+      }
+    }
+    return { text: "No recent reports", source: "none" };
+  };
 
   // ─── Helper: get report display info (works for both court and park reports) ───
   const getReportDisplay = (r) => {
@@ -822,9 +978,10 @@ export default function CourtPulse() {
             const hasCond = court.conditions.length > 0;
             const typeLabel = court.type === "beginner" ? "BEGINNER" : court.type === "challenge" ? "CHALLENGE" : null;
             const typeColor = court.type === "beginner" ? "#6C63FF" : court.type === "challenge" ? "#D4540E" : null;
+            const freshness = getCourtFreshness(court);
 
             return (
-              <g key={court.id} onClick={() => setSelectedCourt(court.id)} style={{ cursor: "pointer" }}>
+              <g key={court.id} onClick={() => setSelectedCourt(court.id)} style={{ cursor: "pointer", opacity: freshness }}>
                 <rect x={x} y={y} width={cW} height={cH} rx="8" fill={cc.fill} stroke={cc.stroke} strokeWidth="2.5"/>
 
                 <text x={x+cW/2} y={y+cH/2+(typeLabel ? 0 : 5)} textAnchor="middle" fontSize="20" fontWeight="800" fill={cc.stroke} fontFamily={ff}>{court.id}</text>
@@ -978,20 +1135,36 @@ export default function CourtPulse() {
   // ═══════════════════════════════════════════════════════════════════════
   const feedbackSection = (
     <div style={{ ...s.section, marginBottom: 100 }}>
-      <a href="mailto:courtpulsenyc@gmail.com?subject=CourtPulse%20Feedback" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px 16px", background: C.card, borderRadius: 12, border: `1px solid ${C.border}`, textDecoration: "none", cursor: "pointer" }}>
+      <a href="mailto:courtpulsenyc@gmail.com?subject=CourtPulse%20Feedback" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px 16px", background: C.card, borderRadius: 12, border: `1px solid ${C.border}`, textDecoration: "none", cursor: "pointer", marginBottom: 8 }}>
         <span style={{ color: C.muted }}>{Icons.Mail(16)}</span>
         <span style={{ fontSize: 13, fontWeight: 600, color: C.sub }}>Feedback or issue? Contact us</span>
       </a>
+      <div style={{ textAlign: "center" }}>
+        <a href="https://courtpulse123.vercel.app/privacy" target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: C.muted, textDecoration: "underline", textUnderlineOffset: 2 }}>Privacy Policy</a>
+      </div>
     </div>
   );
 
   // ═══════════════════════════════════════════════════════════════════════
   // HOME SCREEN
   // ═══════════════════════════════════════════════════════════════════════
+  const loadingSkeleton = (
+    <div style={{ ...s.section, marginTop: 16 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 10 }}>Court Status</div>
+      <div style={{ background: C.card, borderRadius: 14, border: `1px solid ${C.border}`, padding: 20, height: 270, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
+          {[1,2,3,4,5,6,7,8].map(i => (
+            <div key={i} style={{ width: 90, height: 100, borderRadius: 8, background: C.border, animation: "shimmer 1.5s ease-in-out infinite", animationDelay: `${i * 0.1}s` }}/>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+
   const homeScreen = (
     <div style={{ paddingBottom: 90 }}>
       {banner}
-      {courtMap}
+      {loading ? loadingSkeleton : courtMap}
       {weatherWidget}
       {aiPrediction}
       {latestReports}
@@ -1005,7 +1178,7 @@ export default function CourtPulse() {
   const OVERALL_LEVELS = [
     { key: "empty", label: "Empty", desc: "No one playing", color: C.green },
     { key: "half-play", label: "Half Playing", desc: "About half the courts in use", color: C.yellow },
-    { key: "all-play", label: "All Playing", desc: "Every court in use, no wait", color: C.orange },
+    { key: "all-play", label: "All Playing", desc: "Every court in use, no wait", color: C.blue },
     { key: "1-stack-half", label: "1 Stack / Half", desc: "1 stack waiting at half the courts", color: C.orange },
     { key: "1-stack-all", label: "1 Stack / All", desc: "1 stack waiting at every court", color: C.red },
     { key: "2-stack", label: "2+ Stacks", desc: "2 or more stacks deep", color: C.red },
@@ -1106,10 +1279,22 @@ export default function CourtPulse() {
   );
 
   // ═══════════════════════════════════════════════════════════════════════
-  // CHAT BUBBLE (FIXED: word wrap + maxLength)
+  // CHAT BUBBLE (v2.4: linkify, 3-dot bottom, dropdown fix, flag visible, system msgs)
   // ═══════════════════════════════════════════════════════════════════════
   const chatBubble = (msg, chatType) => {
     const isMenuOpen = openMenu?.msgId === msg.id && openMenu?.chatType === chatType;
+
+    // System messages (court reports posted to chat)
+    if (msg.isSystem) {
+      return (
+        <div key={msg.id} style={{ display: "flex", justifyContent: "center", marginBottom: 8, marginTop: 4 }}>
+          <div style={{ background: C.primaryLight, border: `1px solid ${C.primary}22`, borderRadius: 10, padding: "6px 14px", maxWidth: "85%" }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: C.primary }}>{msg.text}</span>
+            <span style={{ fontSize: 10, color: C.muted, marginLeft: 8 }}>{msg.time}</span>
+          </div>
+        </div>
+      );
+    }
 
     if (msg.deleted) {
       return (
@@ -1118,7 +1303,7 @@ export default function CourtPulse() {
             {!msg.self && <div style={{ fontSize: 11, fontWeight: 700, color: C.sub, marginBottom: 2, paddingLeft: 4 }}>{msg.name}</div>}
             <div style={{ padding: "10px 14px", borderRadius: msg.self ? "16px 16px 4px 16px" : "16px 16px 16px 4px", background: msg.self ? "rgba(43,108,176,0.15)" : "#f0f0f0", border: `1px solid ${C.border}` }}>
               <span style={{ fontStyle: "italic", fontSize: 13, color: C.muted }}>
-                🚫 This message was deleted
+                This message was deleted
               </span>
             </div>
             <div style={{ fontSize: 10, color: C.muted, marginTop: 2, textAlign: msg.self ? "right" : "left", paddingLeft: 4, paddingRight: 4 }}>{msg.time}</div>
@@ -1131,7 +1316,7 @@ export default function CourtPulse() {
       <div key={msg.id} style={{ display: "flex", flexDirection: msg.self ? "row-reverse" : "row", gap: 6, marginBottom: 6, alignItems: "flex-end" }}>
         <div style={{ maxWidth: "78%", position: "relative" }}>
           {!msg.self && <div style={{ fontSize: 11, fontWeight: 700, color: C.sub, marginBottom: 2, paddingLeft: 4 }}>{msg.name}</div>}
-          <div style={{ display: "flex", alignItems: msg.self ? "flex-start" : "flex-start", flexDirection: msg.self ? "row-reverse" : "row", gap: 2 }}>
+          <div style={{ display: "flex", alignItems: "flex-end", flexDirection: msg.self ? "row-reverse" : "row", gap: 2 }}>
             <div style={{
               padding: "10px 14px", borderRadius: msg.self ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
               background: msg.self ? C.chatSelf : C.chatOther,
@@ -1140,41 +1325,40 @@ export default function CourtPulse() {
               border: msg.self ? "none" : `1px solid ${C.border}`,
               wordBreak: "break-word",
               overflowWrap: "break-word",
+              whiteSpace: "pre-wrap",
             }}>
-              {msg.flagged ? <span style={{ fontStyle: "italic", opacity: 0.5 }}>This message has been reported</span> : msg.text}
+              <Linkify text={msg.text} color={msg.self ? "#B3D4FF" : C.primary} />
             </div>
 
-            {!msg.flagged && (
-              <div style={{ position: "relative", flexShrink: 0, alignSelf: "center" }}>
-                <button onClick={(e) => { e.stopPropagation(); setOpenMenu(isMenuOpen ? null : { msgId: msg.id, chatType }); }}
-                  style={{ width: 24, height: 24, borderRadius: 12, background: "transparent", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: C.muted, opacity: 0.4 }}>
-                  {Icons.Dots(14)}
-                </button>
+            <div style={{ position: "relative", flexShrink: 0, alignSelf: "flex-end" }}>
+              <button onClick={(e) => { e.stopPropagation(); setOpenMenu(isMenuOpen ? null : { msgId: msg.id, chatType }); }}
+                style={{ width: 24, height: 24, borderRadius: 12, background: "transparent", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: C.muted, opacity: 0.4 }}>
+                {Icons.Dots(14)}
+              </button>
 
-                {isMenuOpen && (
-                  <div style={{
-                    position: "absolute", top: 28, [msg.self ? "right" : "left"]: 0,
-                    background: C.card, borderRadius: 10, boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
-                    border: `1px solid ${C.border}`, overflow: "hidden", zIndex: 50,
-                    minWidth: 160, animation: "fadeIn 0.15s ease",
-                  }}>
-                    {msg.self ? (
-                      <button onClick={(e) => { e.stopPropagation(); handleDelete(msg.id, chatType); }}
-                        style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", width: "100%", background: "none", border: "none", cursor: "pointer", fontFamily: ff, fontSize: 13, fontWeight: 600, color: C.red }}>
-                        <span>{Icons.Trash(14)}</span>
-                        Delete for everyone
-                      </button>
-                    ) : (
-                      <button onClick={(e) => { e.stopPropagation(); handleFlag(msg.id, chatType); }}
-                        style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", width: "100%", background: "none", border: "none", cursor: "pointer", fontFamily: ff, fontSize: 13, fontWeight: 600, color: C.red }}>
-                        <span>{Icons.Flag(14)}</span>
-                        Report message
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+              {isMenuOpen && (
+                <div style={{
+                  position: "absolute", bottom: 28, [msg.self ? "left" : "right"]: 0,
+                  background: C.card, borderRadius: 10, boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
+                  border: `1px solid ${C.border}`, overflow: "hidden", zIndex: 50,
+                  minWidth: 160, animation: "fadeIn 0.15s ease",
+                }}>
+                  {msg.self ? (
+                    <button onClick={(e) => { e.stopPropagation(); handleDelete(msg.id, chatType); }}
+                      style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", width: "100%", background: "none", border: "none", cursor: "pointer", fontFamily: ff, fontSize: 13, fontWeight: 600, color: C.red }}>
+                      <span>{Icons.Trash(14)}</span>
+                      Delete for everyone
+                    </button>
+                  ) : (
+                    <button onClick={(e) => { e.stopPropagation(); handleFlag(msg.id, chatType); }}
+                      style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", width: "100%", background: "none", border: "none", cursor: "pointer", fontFamily: ff, fontSize: 13, fontWeight: 600, color: C.red }}>
+                      <span>{Icons.Flag(14)}</span>
+                      Report message
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
           <div style={{ fontSize: 10, color: C.muted, marginTop: 2, textAlign: msg.self ? "right" : "left", paddingLeft: 4, paddingRight: 4 }}>{msg.time}</div>
         </div>
@@ -1198,10 +1382,10 @@ export default function CourtPulse() {
   ) : null;
 
   // ═══════════════════════════════════════════════════════════════════════
-  // CHAT SCREEN (with spam protection + word wrap)
+  // CHAT SCREEN (v2.4: textarea, enter=newline, nav hides on focus)
   // ═══════════════════════════════════════════════════════════════════════
   const chatScreen = (
-    <div style={{ paddingBottom: 90, display: "flex", flexDirection: "column", height: "100vh" }}>
+    <div style={{ paddingBottom: chatFocused ? 8 : 90, display: "flex", flexDirection: "column", height: "100vh" }}>
       {banner}
       <div style={{ padding: "10px 16px 6px", borderBottom: `1px solid ${C.border}`, background: C.card }}>
         <div style={{ fontSize: 15, fontWeight: 800, color: C.text, fontFamily: "'Fraunces', serif" }}>Marine Park Chat</div>
@@ -1225,9 +1409,12 @@ export default function CourtPulse() {
           </button>
         )}
       </div>
-      <div style={{ padding: "8px 16px", borderTop: `1px solid ${C.border}`, background: C.card, display: "flex", gap: 8, alignItems: "center" }}>
-        <input value={chatInput} onChange={e => setChatInput(e.target.value.slice(0, MAX_MSG_LENGTH))} onKeyDown={e => e.key === "Enter" && sendMainChat()} placeholder="Message..." maxLength={MAX_MSG_LENGTH} style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, outline: "none" }}/>
-        <button onClick={sendMainChat} style={{ width: 38, height: 38, borderRadius: 19, background: chatInput.trim() ? C.primary : C.border, border: "none", cursor: chatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: chatInput.trim() ? "#fff" : C.muted, flexShrink: 0 }}>
+      <div style={{ padding: "8px 16px", borderTop: `1px solid ${C.border}`, background: C.card, display: "flex", gap: 8, alignItems: "flex-end" }}>
+        <textarea ref={chatTextareaRef} value={chatInput} onChange={e => { setChatInput(e.target.value.slice(0, MAX_MSG_LENGTH)); broadcastTyping(); if (e.target) { e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; } }}
+          onFocus={() => setChatFocused(true)} onBlur={() => setChatFocused(false)}
+          placeholder="Message..." maxLength={MAX_MSG_LENGTH} rows={1}
+          style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, outline: "none", resize: "none", maxHeight: 120, lineHeight: 1.4, overflow: "auto" }}/>
+        <button onClick={() => { sendMainChat(); if (chatTextareaRef.current) chatTextareaRef.current.style.height = "auto"; }} style={{ width: 38, height: 38, borderRadius: 19, background: chatInput.trim() ? C.primary : C.border, border: "none", cursor: chatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: chatInput.trim() ? "#fff" : C.muted, flexShrink: 0, marginBottom: 1 }}>
           {Icons.Send(18)}
         </button>
       </div>
@@ -1244,14 +1431,18 @@ export default function CourtPulse() {
     const sc = getStackColor(court.stacks, court.playing);
     const courtMessages = courtChats[selectedCourt] || [];
 
-    const courtReportModal = showCourtReport ? (
+    const courtReportModal = showCourtReport ? (() => {
+      const currentSc = getStackColor(court.stacks, court.playing);
+      const newSc = getStackColor(reportStacks);
+      const changed = reportStacks !== court.stacks;
+      return (
       <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 200, display: "flex", alignItems: "flex-end" }}>
         <div style={{ width: "100%", maxWidth: 430, margin: "0 auto", background: C.card, borderRadius: "20px 20px 0 0", padding: "20px 20px 32px", animation: "slideUp 0.25s ease" }}>
           <div style={{ width: 40, height: 4, borderRadius: 2, background: C.border, margin: "0 auto 16px" }}/>
           <div style={{ fontSize: 16, fontWeight: 800, color: C.text, fontFamily: "'Fraunces', serif", marginBottom: 4 }}>Report Court {selectedCourt}</div>
           <div style={{ fontSize: 12, color: C.sub, marginBottom: 16 }}>{type.label} · {type.sub}</div>
 
-          <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 8 }}>Stacks Waiting</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 8, textAlign: "center" }}>What's the wait right now?</div>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 16, marginBottom: 8 }}>
             <button onClick={() => setReportStacks(Math.max(0, reportStacks - 1))} style={{ width: 44, height: 44, borderRadius: 12, background: C.bg, border: `1px solid ${C.border}`, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: C.sub }}>
               {Icons.Minus(20)}
@@ -1264,7 +1455,7 @@ export default function CourtPulse() {
               {Icons.Plus(20)}
             </button>
           </div>
-          <div style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
             <button onClick={() => setReportStacks(prev => {
               const hasHalf = prev % 1 === 0.5;
               if (hasHalf) return Math.floor(prev);
@@ -1278,6 +1469,27 @@ export default function CourtPulse() {
             }}>
               {reportStacks % 1 === 0.5 ? "Remove ½" : "+ ½ Stack"}
             </button>
+          </div>
+
+          {/* Before/After Preview */}
+          <div style={{ background: C.bg, borderRadius: 10, padding: "10px 14px", marginBottom: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
+              <div style={{ textAlign: "center" }}>
+                <div style={{ fontSize: 11, color: C.muted, marginBottom: 2 }}>Currently</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "center" }}>
+                  <div style={{ width: 8, height: 8, borderRadius: 2, background: currentSc.color }}/>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{currentSc.label}</span>
+                </div>
+              </div>
+              <span style={{ fontSize: 16, color: C.muted }}>→</span>
+              <div style={{ textAlign: "center" }}>
+                <div style={{ fontSize: 11, color: C.muted, marginBottom: 2 }}>{changed ? "Updating to" : "No change"}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "center" }}>
+                  <div style={{ width: 8, height: 8, borderRadius: 2, background: newSc.color }}/>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{newSc.label}</span>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 8 }}>Conditions</div>
@@ -1304,7 +1516,8 @@ export default function CourtPulse() {
           </div>
         </div>
       </div>
-    ) : null;
+      );
+    })() : null;
 
     return (
       <div style={{ position: "fixed", inset: 0, background: C.bg, zIndex: 150, display: "flex", flexDirection: "column", maxWidth: 430, margin: "0 auto" }}>
@@ -1326,9 +1539,9 @@ export default function CourtPulse() {
           <div style={{ ...s.card, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px" }}>
             <div>
               <div style={{ fontSize: 24, fontWeight: 900, color: sc.color, fontFamily: "'Fraunces', serif" }}>{court.stacks === 0 && court.playing ? "Playing" : `${formatStacks(court.stacks)} ${court.stacks === 1 ? "Stack" : "Stacks"}`}</div>
-              {court.lastReport && <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>Reported {court.lastReport} by {court.reporter}</div>}
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{getCourtTimestamp(court).text}</div>
             </div>
-            <button onClick={() => setShowCourtReport(true)} style={{ padding: "10px 18px", borderRadius: 10, background: C.primary, border: "none", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: ff }}>
+            <button onClick={() => { setReportStacks(court.stacks); setShowCourtReport(true); }} style={{ padding: "10px 18px", borderRadius: 10, background: C.primary, border: "none", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: ff }}>
               Report
             </button>
           </div>
@@ -1340,8 +1553,8 @@ export default function CourtPulse() {
           <div ref={courtChatEndRef}/>
         </div>
 
-        <div style={{ padding: "8px 16px env(safe-area-inset-bottom, 8px)", borderTop: `1px solid ${C.border}`, background: C.card, display: "flex", gap: 8, alignItems: "center" }}>
-          <input value={courtChatInput} onChange={e => setCourtChatInput(e.target.value.slice(0, MAX_MSG_LENGTH))} onKeyDown={e => e.key === "Enter" && sendCourtChat()} placeholder={`Message Court ${selectedCourt}...`} maxLength={MAX_MSG_LENGTH} style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, outline: "none" }}/>
+        <div style={{ padding: "8px 16px env(safe-area-inset-bottom, 8px)", borderTop: `1px solid ${C.border}`, background: C.card, display: "flex", gap: 8, alignItems: "flex-end" }}>
+          <textarea value={courtChatInput} onChange={e => { setCourtChatInput(e.target.value.slice(0, MAX_MSG_LENGTH)); if (e.target) { e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; } }} placeholder={`Message Court ${selectedCourt}...`} maxLength={MAX_MSG_LENGTH} rows={1} style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, outline: "none", resize: "none", maxHeight: 120, lineHeight: 1.4, overflow: "auto" }}/>
           <button onClick={sendCourtChat} style={{ width: 38, height: 38, borderRadius: 19, background: courtChatInput.trim() ? C.primary : C.border, border: "none", cursor: courtChatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: courtChatInput.trim() ? "#fff" : C.muted, flexShrink: 0 }}>
             {Icons.Send(18)}
           </button>
@@ -1410,7 +1623,7 @@ export default function CourtPulse() {
       {tab === "report" && reportScreen}
       {tab === "chat" && chatScreen}
 
-      {!selectedCourt && (
+      {!selectedCourt && !chatFocused && (
         <div style={s.nav}>
           {[
             { key: "home", label: "Home", icon: Icons.Home },
@@ -1423,7 +1636,12 @@ export default function CourtPulse() {
                   {t.icon(22)}
                 </div>
               ) : (
-                <span style={{ color: tab === t.key ? C.primary : C.muted }}>{t.icon()}</span>
+                <span style={{ color: tab === t.key ? C.primary : C.muted, position: "relative" }}>
+                  {t.icon()}
+                  {t.key === "chat" && unreadChat && tab !== "chat" && (
+                    <div style={{ position: "absolute", top: -2, right: -4, width: 8, height: 8, borderRadius: 4, background: C.red, border: "2px solid #fff" }}/>
+                  )}
+                </span>
               )}
               <span style={{ fontSize: 11, fontWeight: tab === t.key ? 700 : 500, color: tab === t.key ? C.primary : C.muted }}>{t.label}</span>
             </button>
