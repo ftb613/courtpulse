@@ -7,7 +7,7 @@ const C = {
   card: "#FFFFFF",
   text: "#1B2028",
   sub: "#5A6270",
-  muted: "#8E95A2",
+  muted: "#6B7280",
   border: "#E2E5EB",
   primary: "#2B6CB0",
   primaryLight: "#EBF2FA",
@@ -103,14 +103,15 @@ const MAX_STACKS = 15;
 const FLAG_THRESHOLD = 3; // auto-hide after this many unique flags
 
 // ─── Freshness windows (ms) based on stacks ───
-const getFreshnessMs = (stacks) => {
-  if (stacks <= 0) return 30 * 60 * 1000;
-  if (stacks <= 1) return 45 * 60 * 1000;
-  if (stacks <= 2) return 60 * 60 * 1000;
-  if (stacks <= 3) return 75 * 60 * 1000;
-  if (stacks <= 4) return 90 * 60 * 1000;
-  if (stacks <= 5) return 105 * 60 * 1000;
-  return 120 * 60 * 1000; // 6+ stacks
+const getFreshnessMs = (stacks, playing = false) => {
+  if (stacks <= 0 && !playing) return 0;
+  if (stacks <= 0 && playing) return 15 * 60 * 1000;
+  if (stacks <= 1) return 30 * 60 * 1000;
+  if (stacks <= 2) return 45 * 60 * 1000;
+  if (stacks <= 3) return 60 * 60 * 1000;
+  if (stacks <= 4) return 75 * 60 * 1000;
+  if (stacks <= 5) return 90 * 60 * 1000;
+  return 105 * 60 * 1000;
 };
 
 // ─── Icons ───
@@ -145,9 +146,18 @@ const WeatherIcon = ({ type, size = 18 }) => {
   return Icons.Sun(size);
 };
 
-const FontLoader = () => (
-  <style>{`
-    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Fraunces:wght@700;800;900&display=swap');
+const FontLoader = () => {
+  useEffect(() => {
+    if (!document.getElementById("courtpulse-fonts")) {
+      const link = document.createElement("link");
+      link.id = "courtpulse-fonts";
+      link.rel = "stylesheet";
+      link.href = "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Fraunces:wght@700;800;900&display=swap";
+      document.head.appendChild(link);
+    }
+  }, []);
+  return (
+    <style>{`
     @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
     @keyframes fadeDown { from { opacity: 0; transform: translate(-50%, -10px); } to { opacity: 1; transform: translate(-50%, 0); } }
     @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
@@ -158,19 +168,33 @@ const FontLoader = () => (
     @keyframes shimmer { 0% { opacity: 0.4; } 50% { opacity: 0.7; } 100% { opacity: 0.4; } }
     textarea { font-family: inherit; }
   `}</style>
-);
+  );
+};
 
 // ─── Linkify: auto-detect URLs and make them tappable ───
 const Linkify = ({ text, color = C.primary }) => {
-  const urlPattern = /(https?:\/\/[^\s]+)/g;
-  const parts = text.split(urlPattern);
-  return parts.map((part, i) =>
-    /^https?:\/\//.test(part) ? (
-      <a key={i} href={part} target="_blank" rel="noopener noreferrer"
-        style={{ color, textDecoration: "underline", wordBreak: "break-all" }}
-        onClick={e => e.stopPropagation()}>{part}</a>
-    ) : <span key={i}>{part}</span>
-  );
+  const urlPattern = /(https?:\/\/[^\s]+|(?:www\.)[^\s]+|(?:[a-zA-Z0-9-]+\.(?:com|org|net|io|co|app|dev|me|info|edu|gov)(?:\/[^\s]*)?))/g;
+  const parts = [];
+  let last = 0;
+  let match;
+  while ((match = urlPattern.exec(text)) !== null) {
+    if (match.index > last) parts.push({ text: text.slice(last, match.index), isLink: false });
+    parts.push({ text: match[0], isLink: true });
+    last = urlPattern.lastIndex;
+  }
+  if (last < text.length) parts.push({ text: text.slice(last), isLink: false });
+  if (parts.length === 0) return <span>{text}</span>;
+  return parts.map((p, i) => {
+    if (p.isLink) {
+      const href = /^https?:\/\//.test(p.text) ? p.text : `https://${p.text}`;
+      return (
+        <a key={i} href={href} target="_blank" rel="noopener noreferrer"
+          style={{ color, textDecoration: "underline", wordBreak: "break-all" }}
+          onClick={e => e.stopPropagation()}>{p.text}</a>
+      );
+    }
+    return <span key={i}>{p.text}</span>;
+  });
 };
 
 // ─── Helpers ───
@@ -208,6 +232,23 @@ const weatherCodeToIcon = (code) => {
   return "sun";
 };
 
+// Weather code → human-readable condition text
+const weatherCodeToText = (code) => {
+  if (code === 0) return "Clear skies";
+  if (code === 1) return "Mostly clear";
+  if (code === 2) return "Partly cloudy";
+  if (code === 3) return "Overcast";
+  if (code === 45 || code === 48) return "Foggy";
+  if (code >= 51 && code <= 55) return "Drizzle";
+  if (code >= 56 && code <= 57) return "Freezing drizzle";
+  if (code >= 61 && code <= 65) return "Rainy";
+  if (code >= 66 && code <= 67) return "Freezing rain";
+  if (code >= 71 && code <= 77) return "Snow";
+  if (code >= 80 && code <= 82) return "Rain showers";
+  if (code >= 95) return "Thunderstorm";
+  return "Clear";
+};
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -235,10 +276,14 @@ export default function CourtPulse() {
   const [hourlyWeather, setHourlyWeather] = useState(HOURLY_FALLBACK);
   const [currentTemp, setCurrentTemp] = useState(null);
   const [currentWeatherIcon, setCurrentWeatherIcon] = useState("sun");
+  const [currentWind, setCurrentWind] = useState(null);
+  const [currentConditionText, setCurrentConditionText] = useState("");
+  const [dailyHigh, setDailyHigh] = useState(null);
+  const [dailyLow, setDailyLow] = useState(null);
 
   // ─── Fetch live weather ───
   useEffect(() => {
-    fetch("https://api.open-meteo.com/v1/forecast?latitude=40.6128&longitude=-73.9244&hourly=temperature_2m,weather_code&temperature_unit=fahrenheit&timezone=America/New_York&forecast_days=1")
+    fetch("https://api.open-meteo.com/v1/forecast?latitude=40.6128&longitude=-73.9244&hourly=temperature_2m,weather_code,windspeed_10m&daily=temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&windspeed_unit=mph&timezone=America/New_York&forecast_days=1")
       .then(r => r.json())
       .then(data => {
         const now = new Date();
@@ -259,7 +304,6 @@ export default function CourtPulse() {
         }
         if (mapped.length > 0) {
           setHourlyWeather(mapped);
-          // Find current hour's data
           const nowEntry = mapped.find(m => m.hour === "Now");
           if (nowEntry) {
             setCurrentTemp(nowEntry.temp);
@@ -268,6 +312,20 @@ export default function CourtPulse() {
             setCurrentTemp(mapped[0].temp);
             setCurrentWeatherIcon(mapped[0].icon);
           }
+        }
+        // Current wind speed
+        const currentHourIndex = hourly.time.findIndex(t => new Date(t).getHours() === currentHour);
+        if (currentHourIndex >= 0 && hourly.windspeed_10m) {
+          setCurrentWind(Math.round(hourly.windspeed_10m[currentHourIndex]));
+        }
+        // Current condition text
+        if (currentHourIndex >= 0 && hourly.weather_code) {
+          setCurrentConditionText(weatherCodeToText(hourly.weather_code[currentHourIndex]));
+        }
+        // Daily hi/lo
+        if (data.daily) {
+          if (data.daily.temperature_2m_max?.[0] != null) setDailyHigh(Math.round(data.daily.temperature_2m_max[0]));
+          if (data.daily.temperature_2m_min?.[0] != null) setDailyLow(Math.round(data.daily.temperature_2m_min[0]));
         }
       })
       .catch(() => {}); // keep fallback
@@ -359,7 +417,7 @@ export default function CourtPulse() {
             if (mapping) {
               const now = Date.now();
               result = result.map(c => {
-                const freshMs = getFreshnessMs(c.stacks);
+                const freshMs = getFreshnessMs(c.stacks, c.playing);
                 const isFresh = c.lastReportAt && (now - c.lastReportAt < freshMs);
                 if (isFresh) return c;
                 return { ...c, stacks: mapping.stacks, playing: mapping.playing };
@@ -531,7 +589,7 @@ export default function CourtPulse() {
         if (mapping) {
           const now = Date.now();
           setCourts(prev => prev.map(c => {
-            const freshMs = getFreshnessMs(c.stacks);
+            const freshMs = getFreshnessMs(c.stacks, c.playing);
             const isFresh = c.lastReportAt && (now - c.lastReportAt < freshMs);
             if (isFresh) return c;
             return { ...c, stacks: mapping.stacks, playing: mapping.playing };
@@ -554,6 +612,13 @@ export default function CourtPulse() {
         key !== userName && presences.some(p => p.typing === true)
       );
       setSomeoneTyping(anyoneElseTyping);
+      // Safety timeout: auto-clear after 5 seconds even if "stopped" event is lost
+      if (anyoneElseTyping) {
+        if (typingReceiveTimerRef.current) clearTimeout(typingReceiveTimerRef.current);
+        typingReceiveTimerRef.current = setTimeout(() => setSomeoneTyping(false), 5000);
+      } else {
+        if (typingReceiveTimerRef.current) clearTimeout(typingReceiveTimerRef.current);
+      }
     });
 
     typingChannel.subscribe(async (status) => {
@@ -590,6 +655,7 @@ export default function CourtPulse() {
   const [someoneTyping, setSomeoneTyping] = useState(false);
   const typingTimerRef = useRef(null);
   const typingChannelRef = useRef(null);
+  const typingReceiveTimerRef = useRef(null); // safety timeout on receiving end
   const lastSendRef = useRef(0); // spam protection
 
   const chatEndRef = useRef(null);
@@ -727,49 +793,57 @@ export default function CourtPulse() {
     showToast("Message deleted.");
   };
 
-  // ─── Court Report (stacks capped at MAX_STACKS) ───
+  // ─── Court Report (snappy: close instantly, DB writes in background) ───
   const submitCourtReport = useCallback(async () => {
     if (reportStacks === null || !selectedCourt) return;
     const courtUuid = courtUuidMap.current[selectedCourt];
     if (!courtUuid) return;
 
-    setCourts(p => p.map(c => c.id === selectedCourt
-      ? { ...c, stacks: reportStacks, playing: reportStacks > 0, conditions: reportConditions, lastReport: "Just now", lastReportAt: Date.now(), reporter: "You" }
+    // Capture values before resetting state
+    const _stacks = reportStacks;
+    const _conditions = reportConditions;
+    const _text = reportText;
+    const _court = selectedCourt;
+
+    // Optimistic UI update
+    setCourts(p => p.map(c => c.id === _court
+      ? { ...c, stacks: _stacks, playing: _stacks > 0, conditions: _conditions, lastReport: "Just now", lastReportAt: Date.now(), reporter: "You" }
       : c
     ));
 
-    const { error } = await supabase.from("reports").insert({
-      park_id: "marine-park",
-      court_id: courtUuid,
-      stacks: reportStacks,
-      conditions: reportConditions,
-      comment: reportText || null,
-      reporter_name: userName,
-      status: reportStacks === 0 ? "open" : "in-use",
-    });
-
-    if (error) console.error("Report submit error:", error);
-
-    // Send system message to court chat (fire and forget)
-    const systemText = reportStacks === 0 ? `${userName} reported: Empty` : `${userName} reported: ${formatStacks(reportStacks)} ${reportStacks === 1 ? "stack" : "stacks"}`;
-    try {
-      await supabase.from("chat_messages").insert({
-        park_id: "marine-park",
-        court_id: courtUuid,
-        user_name: "System",
-        text: systemText,
-        is_system: true,
-      });
-    } catch (e) {
-      console.error("System message error:", e);
-    }
-
+    // Close modal and reset immediately
     setShowCourtReport(false);
     setReportStacks(0);
     setReportConditions([]);
     setReportText("");
     setShowCourtReportExtras(false);
     showToast("Report submitted!");
+
+    // Fire-and-forget DB writes
+    (async () => {
+      try {
+        await supabase.from("reports").insert({
+          park_id: "marine-park",
+          court_id: courtUuid,
+          stacks: _stacks,
+          conditions: _conditions,
+          comment: _text || null,
+          reporter_name: userName,
+          status: _stacks === 0 ? "open" : "in-use",
+        });
+      } catch (e) { console.error("Report submit error:", e); }
+
+      try {
+        const systemText = _stacks === 0 ? `${userName} reported: Empty` : `${userName} reported: ${formatStacks(_stacks)} ${_stacks === 1 ? "stack" : "stacks"}`;
+        await supabase.from("chat_messages").insert({
+          park_id: "marine-park",
+          court_id: courtUuid,
+          user_name: "System",
+          text: systemText,
+          is_system: true,
+        });
+      } catch (e) { console.error("System message error:", e); }
+    })();
   }, [reportStacks, reportConditions, reportText, selectedCourt, userName]);
 
   // ─── Park-Level Report (FIXED: allows comment/condition-only, applies formula) ───
@@ -802,7 +876,7 @@ export default function CourtPulse() {
       if (mapping) {
         const now = Date.now();
         setCourts(prev => prev.map(c => {
-          const freshMs = getFreshnessMs(c.stacks);
+          const freshMs = getFreshnessMs(c.stacks, c.playing);
           const isFresh = c.lastReportAt && (now - c.lastReportAt < freshMs);
           if (isFresh) return c;
           return { ...c, stacks: mapping.stacks, playing: mapping.playing };
@@ -839,7 +913,7 @@ export default function CourtPulse() {
   // ─── Court timestamp helper ───
   const getCourtTimestamp = (court) => {
     const now = Date.now();
-    const freshMs = getFreshnessMs(court.stacks);
+    const freshMs = getFreshnessMs(court.stacks, court.playing);
     if (court.lastReportAt) {
       const age = now - court.lastReportAt;
       if (age < freshMs) {
@@ -868,7 +942,7 @@ export default function CourtPulse() {
       borderColor = LEVEL_COLORS[r.level] || C.border;
       displayLabel = LEVEL_LABELS[r.level] || null;
     } else {
-      borderColor = C.primary;
+      borderColor = C.muted;
       displayLabel = null;
     }
     return { borderColor, displayLabel };
@@ -933,12 +1007,6 @@ export default function CourtPulse() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 5, background: "rgba(255,255,255,0.1)", padding: "5px 10px", borderRadius: 8 }}>
-            <span style={{ color: currentWeatherIcon === "rain" ? C.primary : currentWeatherIcon === "cloud" ? "#ccc" : "#F0C040" }}>
-              <WeatherIcon type={currentWeatherIcon} size={14} />
-            </span>
-            <span style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>{currentTemp !== null ? `${currentTemp}°` : "--"}</span>
-          </div>
           <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(255,255,255,0.1)", padding: "5px 10px", borderRadius: 8 }}>
             {Icons.Clock(12)}
             <span style={{ fontSize: 11, fontWeight: 600, color: "rgba(255,255,255,0.8)" }}>{PARK.hours}</span>
@@ -986,7 +1054,6 @@ export default function CourtPulse() {
             const x = startX + pos.col * (cW + gap);
             const y = pos.row === 0 ? topY : botY;
             const cc = COURT_COLOR(court.stacks, court.playing);
-            const hasCond = court.conditions.length > 0;
             const typeLabel = court.type === "beginner" ? "BEGINNER" : court.type === "challenge" ? "CHALLENGE" : null;
             const typeColor = court.type === "beginner" ? "#6C63FF" : court.type === "challenge" ? "#D4540E" : null;
             const freshness = getCourtFreshness(court);
@@ -1003,8 +1070,6 @@ export default function CourtPulse() {
                     <text x={x+cW/2} y={y+cH/2+19} textAnchor="middle" fontSize="8.5" fontWeight="700" fill={typeColor} fontFamily={ff} opacity="0.9">{typeLabel}</text>
                   </g>
                 )}
-
-                {hasCond && <circle cx={x+cW-9} cy={y+9} r="4.5" fill={C.yellow} stroke="#fff" strokeWidth="1.5"/>}
               </g>
             );
           })}
@@ -1038,25 +1103,51 @@ export default function CourtPulse() {
   })();
 
   // ═══════════════════════════════════════════════════════════════════════
-  // WEATHER WIDGET (live hourly from Open-Meteo)
+  // WEATHER WIDGET (Option C: summary header + hourly scroll)
   // ═══════════════════════════════════════════════════════════════════════
   const weatherWidget = (
     <div style={{ ...s.section }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 10 }}>Today's Weather</div>
-      <div style={{ ...s.card, padding: "14px 0" }}>
-        <div style={{ display: "flex", gap: 0, overflowX: "auto", padding: "0 14px", WebkitOverflowScrolling: "touch" }}>
+      <div style={{ ...s.card, padding: 0, overflow: "hidden" }}>
+        {/* Summary header */}
+        <div style={{ padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: `1px solid ${C.border}` }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ color: currentWeatherIcon === "rain" ? C.primary : currentWeatherIcon === "cloud" ? C.muted : "#F0C040" }}>
+              <WeatherIcon type={currentWeatherIcon} size={22} />
+            </span>
+            <div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: C.text, lineHeight: 1 }}>{currentTemp !== null ? `${currentTemp}°` : "--"}</div>
+              <div style={{ fontSize: 12, color: C.sub, marginTop: 2 }}>{currentConditionText || "Loading..."}</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 11, color: C.sub }}>Hi / Lo</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginTop: 1 }}>{dailyHigh !== null ? `${dailyHigh}°` : "--"} / {dailyLow !== null ? `${dailyLow}°` : "--"}</div>
+            </div>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "center" }}>
+                {Icons.Wind(11)}
+                <span style={{ fontSize: 11, color: C.sub }}>Wind</span>
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginTop: 1 }}>{currentWind !== null ? `${currentWind} mph` : "--"}</div>
+            </div>
+          </div>
+        </div>
+        {/* Hourly scroll */}
+        <div style={{ display: "flex", gap: 0, overflowX: "auto", padding: "12px 14px", WebkitOverflowScrolling: "touch" }}>
           {hourlyWeather.map((h, i) => (
             <div key={i} style={{
               display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
-              minWidth: 56, padding: "6px 4px", borderRadius: 10,
+              minWidth: 52, padding: "6px 4px", borderRadius: 10,
               background: h.hour === "Now" ? C.primaryLight : "transparent",
               border: h.hour === "Now" ? `1.5px solid ${C.primary}33` : "1px solid transparent",
             }}>
               <span style={{ fontSize: 12, fontWeight: h.hour === "Now" ? 700 : 500, color: h.hour === "Now" ? C.primary : C.sub }}>{h.hour}</span>
               <span style={{ color: h.icon === "rain" ? C.primary : h.icon === "cloud" ? C.muted : "#F0C040" }}>
-                <WeatherIcon type={h.icon} size={18} />
+                <WeatherIcon type={h.icon} size={16} />
               </span>
-              <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{h.temp}°</span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{h.temp}°</span>
             </div>
           ))}
         </div>
@@ -1164,9 +1255,9 @@ export default function CourtPulse() {
     <div style={{ ...s.section, marginTop: 16 }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 10 }}>Court Status</div>
       <div style={{ background: C.card, borderRadius: 14, border: `1px solid ${C.border}`, padding: 20, height: 270, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 90px)", gap: 10, justifyContent: "center" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, justifyContent: "center", padding: "0 4px" }}>
           {[1,2,3,4,5,6,7,8].map(i => (
-            <div key={i} style={{ width: 90, height: 100, borderRadius: 8, background: C.border, animation: "shimmer 1.5s ease-in-out infinite", animationDelay: `${i * 0.1}s` }}/>
+            <div key={i} style={{ width: "100%", aspectRatio: "90/100", borderRadius: 8, background: C.border, animation: "shimmer 1.5s ease-in-out infinite", animationDelay: `${i * 0.1}s` }}/>
           ))}
         </div>
       </div>
@@ -1424,6 +1515,7 @@ export default function CourtPulse() {
       <div style={{ padding: "8px 16px", borderTop: `1px solid ${C.border}`, background: C.card, display: "flex", gap: 8, alignItems: "flex-end" }}>
         <textarea ref={chatTextareaRef} value={chatInput} onChange={e => { setChatInput(e.target.value.slice(0, MAX_MSG_LENGTH)); broadcastTyping(); if (e.target) { e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; } }}
           onFocus={() => setChatFocused(true)} onBlur={() => setChatFocused(false)}
+          onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) { e.preventDefault(); sendMainChat(); if (chatTextareaRef.current) chatTextareaRef.current.style.height = "auto"; } }}
           placeholder="Message..." maxLength={MAX_MSG_LENGTH} rows={1}
           style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, outline: "none", resize: "none", maxHeight: 120, lineHeight: 1.4, overflow: "auto" }}/>
         <button onClick={() => { sendMainChat(); if (chatTextareaRef.current) chatTextareaRef.current.style.height = "auto"; }} style={{ width: 38, height: 38, borderRadius: 19, background: chatInput.trim() ? C.primary : C.border, border: "none", cursor: chatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: chatInput.trim() ? "#fff" : C.muted, flexShrink: 0, marginBottom: 1 }}>
@@ -1445,8 +1537,8 @@ export default function CourtPulse() {
 
     const courtReportModal = showCourtReport ? (() => {
       return (
-      <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 200, display: "flex", alignItems: "flex-end" }}>
-        <div style={{ width: "100%", maxWidth: 430, margin: "0 auto", background: C.card, borderRadius: "20px 20px 0 0", padding: "20px 20px 32px", animation: "slideUp 0.25s ease" }}>
+      <div onClick={() => { setShowCourtReport(false); setReportStacks(0); setReportConditions([]); setReportText(""); setShowCourtReportExtras(false); }} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 200, display: "flex", alignItems: "flex-end" }}>
+        <div onClick={e => e.stopPropagation()} style={{ width: "100%", maxWidth: 430, margin: "0 auto", background: C.card, borderRadius: "20px 20px 0 0", padding: "20px 20px 32px", animation: "slideUp 0.25s ease" }}>
           <div style={{ width: 40, height: 4, borderRadius: 2, background: C.border, margin: "0 auto 16px" }}/>
           <div style={{ fontSize: 16, fontWeight: 800, color: C.text, fontFamily: "'Fraunces', serif", marginBottom: 4 }}>Report Court {selectedCourt}</div>
           <div style={{ fontSize: 12, color: C.sub, marginBottom: 16 }}>{type.label} · {type.sub}</div>
@@ -1552,7 +1644,7 @@ export default function CourtPulse() {
         </div>
 
         <div style={{ padding: "8px 16px env(safe-area-inset-bottom, 8px)", borderTop: `1px solid ${C.border}`, background: C.card, display: "flex", gap: 8, alignItems: "flex-end" }}>
-          <textarea value={courtChatInput} onChange={e => { setCourtChatInput(e.target.value.slice(0, MAX_MSG_LENGTH)); if (e.target) { e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; } }} placeholder={`Message Court ${selectedCourt}...`} maxLength={MAX_MSG_LENGTH} rows={1} style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, outline: "none", resize: "none", maxHeight: 120, lineHeight: 1.4, overflow: "auto" }}/>
+          <textarea value={courtChatInput} onChange={e => { setCourtChatInput(e.target.value.slice(0, MAX_MSG_LENGTH)); if (e.target) { e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; } }} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) { e.preventDefault(); sendCourtChat(); } }} placeholder={`Message Court ${selectedCourt}...`} maxLength={MAX_MSG_LENGTH} rows={1} style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, outline: "none", resize: "none", maxHeight: 120, lineHeight: 1.4, overflow: "auto" }}/>
           <button onClick={sendCourtChat} style={{ width: 38, height: 38, borderRadius: 19, background: courtChatInput.trim() ? C.primary : C.border, border: "none", cursor: courtChatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: courtChatInput.trim() ? "#fff" : C.muted, flexShrink: 0 }}>
             {Icons.Send(18)}
           </button>
@@ -1610,6 +1702,7 @@ export default function CourtPulse() {
   // RENDER
   // ═══════════════════════════════════════════════════════════════════════
   return (
+    <main>
     <div style={s.wrap}>
       <FontLoader />
       {toastEl}
@@ -1647,5 +1740,6 @@ export default function CourtPulse() {
         </div>
       )}
     </div>
+    </main>
   );
 }
