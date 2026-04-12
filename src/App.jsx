@@ -22,6 +22,8 @@ const C = {
   redLight: "#FDECEB",
   blue: "#4A9EBF",
   blueLight: "#E3F2F8",
+  darkRed: "#8B1A1A",
+  darkRedLight: "#F5E0E0",
   chatSelf: "#2B6CB0",
   chatOther: "#FFFFFF",
   banner: "#1A3A5C",
@@ -92,7 +94,7 @@ const CONDITIONS = [
 
 // ─── Level labels/colors for park-level reports ───
 const LEVEL_LABELS = ["Empty","Half Playing","All Playing","1 Stack / Half","1 Stack / All","2+ Stacks"];
-const LEVEL_COLORS = [C.green, C.yellow, C.blue, C.orange, C.red, C.red];
+const LEVEL_COLORS = [C.green, C.blue, C.blue, C.yellow, C.yellow, C.orange];
 
 // ─── Spam protection ───
 const SEND_COOLDOWN = 3000; // 3 seconds
@@ -177,7 +179,8 @@ const getStackColor = (stacks, playing = false) => {
   if (stacks === 0) return { bg: C.greenLight, color: C.green, label: "Empty" };
   if (stacks <= 1) return { bg: C.yellowLight, color: C.yellow, label: stacks === 0.5 ? "½ Stack" : "1 Stack" };
   if (stacks <= 2) return { bg: C.orangeLight, color: C.orange, label: `${stacks % 1 === 0.5 ? stacks : stacks} Stacks` };
-  return { bg: C.redLight, color: C.red, label: `${stacks % 1 === 0.5 ? stacks : stacks}+ Stacks` };
+  if (stacks <= 3) return { bg: C.redLight, color: C.red, label: `${stacks % 1 === 0.5 ? stacks : stacks} Stacks` };
+  return { bg: C.darkRedLight, color: C.darkRed, label: `${stacks % 1 === 0.5 ? stacks : stacks} Stacks` };
 };
 
 // v2-style court colors (fill + stroke)
@@ -186,7 +189,8 @@ const COURT_COLOR = (stacks, playing = false) => {
   if (stacks === 0) return { fill: "#27AE6044", stroke: "#27AE60" };
   if (stacks <= 1) return { fill: "#E2A61244", stroke: "#E2A612" };
   if (stacks <= 2) return { fill: "#E67E2244", stroke: "#E67E22" };
-  return { fill: "#E74C3C44", stroke: "#E74C3C" };
+  if (stacks <= 3) return { fill: "#E74C3C44", stroke: "#E74C3C" };
+  return { fill: "#8B1A1A44", stroke: "#8B1A1A" };
 };
 
 const formatStacks = (n) => {
@@ -388,6 +392,18 @@ export default function CourtPulse() {
           deleted: m.deleted || false,
           isSystem: m.is_system || false,
         })));
+
+        // Check for unread messages since last visit
+        try {
+          const lastSeen = parseInt(localStorage.getItem("courtpulse_lastChatSeen") || "0");
+          if (dbMainChat.length > 0) {
+            const newestMsg = dbMainChat[dbMainChat.length - 1];
+            const newestTime = new Date(newestMsg.created_at).getTime();
+            if (newestTime > lastSeen && newestMsg.user_name !== userName) {
+              setUnreadChat(true);
+            }
+          }
+        } catch {}
       }
 
       // Fetch court-specific chats
@@ -569,6 +585,7 @@ export default function CourtPulse() {
   const [openMenu, setOpenMenu] = useState(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [showReportExtras, setShowReportExtras] = useState(false);
+  const [showCourtReportExtras, setShowCourtReportExtras] = useState(false);
 
   const [someoneTyping, setSomeoneTyping] = useState(false);
   const typingTimerRef = useRef(null);
@@ -584,6 +601,7 @@ export default function CourtPulse() {
   useEffect(() => {
     if (tab === "chat") {
       setUnreadChat(false);
+      try { localStorage.setItem("courtpulse_lastChatSeen", Date.now().toString()); } catch {}
       if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [tab, mainChat]);
@@ -625,7 +643,7 @@ export default function CourtPulse() {
     try { if (contact) localStorage.setItem("courtpulse_contact", contact); } catch {}
     setUserName(name);
     // Fire-and-forget DB insert
-    supabase.from("users").insert({ name, contact }).catch(() => {});
+    (async () => { try { await supabase.from("users").insert({ name, contact }); } catch {} })();
   };
 
   // ─── Chat (with spam protection) ───
@@ -732,21 +750,25 @@ export default function CourtPulse() {
 
     if (error) console.error("Report submit error:", error);
 
-    // Send system message to court chat
-    const sc = getStackColor(reportStacks);
+    // Send system message to court chat (fire and forget)
     const systemText = reportStacks === 0 ? `${userName} reported: Empty` : `${userName} reported: ${formatStacks(reportStacks)} ${reportStacks === 1 ? "stack" : "stacks"}`;
-    await supabase.from("chat_messages").insert({
-      park_id: "marine-park",
-      court_id: courtUuid,
-      user_name: "System",
-      text: systemText,
-      is_system: true,
-    }).catch(() => {});
+    try {
+      await supabase.from("chat_messages").insert({
+        park_id: "marine-park",
+        court_id: courtUuid,
+        user_name: "System",
+        text: systemText,
+        is_system: true,
+      });
+    } catch (e) {
+      console.error("System message error:", e);
+    }
 
     setShowCourtReport(false);
     setReportStacks(0);
     setReportConditions([]);
     setReportText("");
+    setShowCourtReportExtras(false);
     showToast("Report submitted!");
   }, [reportStacks, reportConditions, reportText, selectedCourt, userName]);
 
@@ -809,20 +831,9 @@ export default function CourtPulse() {
 
   // ─── Court freshness helper ───
   const getCourtFreshness = (court) => {
-    const now = Date.now();
-    const freshMs = getFreshnessMs(court.stacks);
-    if (court.lastReportAt) {
-      const age = now - court.lastReportAt;
-      if (age < freshMs) return 1; // fully fresh
-      return 0.4; // stale → faded
-    }
-    // Check park report
-    if (parkReportAt) {
-      const parkAge = now - parkReportAt;
-      if (parkAge < 30 * 60 * 1000) return 1; // park report within 30 min
-      return 0.4;
-    }
-    return 1; // no data = show default (which is empty/green)
+    // Fade disabled for soft launch — timestamps communicate freshness instead.
+    // Revisit once reporting volume is consistent.
+    return 1;
   };
 
   // ─── Court timestamp helper ───
@@ -1004,9 +1015,10 @@ export default function CourtPulse() {
           {[
             { color: "#27AE60", label: "Empty" },
             { color: "#4A9EBF", label: "Playing" },
-            { color: "#E2A612", label: "≤1 Stack" },
+            { color: "#E2A612", label: "1 Stack" },
             { color: "#E67E22", label: "2 Stacks" },
-            { color: "#E74C3C", label: "3+ Stacks" },
+            { color: "#E74C3C", label: "3 Stacks" },
+            { color: "#8B1A1A", label: "3+" },
           ].map(l => (
             <div key={l.label} style={{ display: "flex", alignItems: "center", gap: 5 }}>
               <div style={{ width: 10, height: 10, borderRadius: 3, background: l.color, opacity: 0.7 }}/>
@@ -1140,7 +1152,7 @@ export default function CourtPulse() {
         <span style={{ fontSize: 13, fontWeight: 600, color: C.sub }}>Feedback or issue? Contact us</span>
       </a>
       <div style={{ textAlign: "center" }}>
-        <a href="https://courtpulse123.vercel.app/privacy" target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: C.muted, textDecoration: "underline", textUnderlineOffset: 2 }}>Privacy Policy</a>
+        <a href="/privacy.html" target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: C.muted, textDecoration: "underline", textUnderlineOffset: 2 }}>Privacy Policy</a>
       </div>
     </div>
   );
@@ -1152,7 +1164,7 @@ export default function CourtPulse() {
     <div style={{ ...s.section, marginTop: 16 }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 10 }}>Court Status</div>
       <div style={{ background: C.card, borderRadius: 14, border: `1px solid ${C.border}`, padding: 20, height: 270, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 90px)", gap: 10, justifyContent: "center" }}>
           {[1,2,3,4,5,6,7,8].map(i => (
             <div key={i} style={{ width: 90, height: 100, borderRadius: 8, background: C.border, animation: "shimmer 1.5s ease-in-out infinite", animationDelay: `${i * 0.1}s` }}/>
           ))}
@@ -1177,11 +1189,11 @@ export default function CourtPulse() {
   // ═══════════════════════════════════════════════════════════════════════
   const OVERALL_LEVELS = [
     { key: "empty", label: "Empty", desc: "No one playing", color: C.green },
-    { key: "half-play", label: "Half Playing", desc: "About half the courts in use", color: C.yellow },
+    { key: "half-play", label: "Half Playing", desc: "About half the courts in use", color: C.blue },
     { key: "all-play", label: "All Playing", desc: "Every court in use, no wait", color: C.blue },
-    { key: "1-stack-half", label: "1 Stack / Half", desc: "1 stack waiting at half the courts", color: C.orange },
-    { key: "1-stack-all", label: "1 Stack / All", desc: "1 stack waiting at every court", color: C.red },
-    { key: "2-stack", label: "2+ Stacks", desc: "2 or more stacks deep", color: C.red },
+    { key: "1-stack-half", label: "1 Stack / Half", desc: "1 stack waiting at half the courts", color: C.yellow },
+    { key: "1-stack-all", label: "1 Stack / All", desc: "1 stack waiting at every court", color: C.yellow },
+    { key: "2-stack", label: "2+ Stacks", desc: "2 or more stacks deep", color: C.orange },
   ];
 
   const parkReportHasContent = parkReportLevel !== null || parkReportConditions.length > 0 || parkReportText.trim();
@@ -1432,9 +1444,6 @@ export default function CourtPulse() {
     const courtMessages = courtChats[selectedCourt] || [];
 
     const courtReportModal = showCourtReport ? (() => {
-      const currentSc = getStackColor(court.stacks, court.playing);
-      const newSc = getStackColor(reportStacks);
-      const changed = reportStacks !== court.stacks;
       return (
       <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 200, display: "flex", alignItems: "flex-end" }}>
         <div style={{ width: "100%", maxWidth: 430, margin: "0 auto", background: C.card, borderRadius: "20px 20px 0 0", padding: "20px 20px 32px", animation: "slideUp 0.25s ease" }}>
@@ -1471,47 +1480,36 @@ export default function CourtPulse() {
             </button>
           </div>
 
-          {/* Before/After Preview */}
-          <div style={{ background: C.bg, borderRadius: 10, padding: "10px 14px", marginBottom: 16 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
-              <div style={{ textAlign: "center" }}>
-                <div style={{ fontSize: 11, color: C.muted, marginBottom: 2 }}>Currently</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "center" }}>
-                  <div style={{ width: 8, height: 8, borderRadius: 2, background: currentSc.color }}/>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{currentSc.label}</span>
-                </div>
+          <button onClick={() => setShowCourtReportExtras(prev => !prev)} style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            width: "100%", padding: 10, background: "none", border: "none", cursor: "pointer", fontFamily: ff, marginBottom: 8,
+          }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: C.sub }}>Add conditions or a note</span>
+            <span style={{ transform: showCourtReportExtras ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s", color: C.sub }}>{Icons.ChevronDown(14)}</span>
+          </button>
+          {showCourtReportExtras && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 8 }}>Conditions</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                {CONDITIONS.map(c => {
+                  const active = reportConditions.includes(c.key);
+                  return (
+                    <button key={c.key} onClick={() => setReportConditions(p => active ? p.filter(x => x !== c.key) : [...p, c.key])} style={{
+                      padding: "8px 14px", borderRadius: 8,
+                      background: active ? C.primaryLight : C.bg,
+                      border: active ? `1.5px solid ${C.primary}` : `1px solid ${C.border}`,
+                      color: active ? C.primary : C.sub,
+                      fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: ff,
+                    }}>{c.label}</button>
+                  );
+                })}
               </div>
-              <span style={{ fontSize: 16, color: C.muted }}>→</span>
-              <div style={{ textAlign: "center" }}>
-                <div style={{ fontSize: 11, color: C.muted, marginBottom: 2 }}>{changed ? "Updating to" : "No change"}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "center" }}>
-                  <div style={{ width: 8, height: 8, borderRadius: 2, background: newSc.color }}/>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{newSc.label}</span>
-                </div>
-              </div>
+              <textarea value={reportText} onChange={e => setReportText(e.target.value)} placeholder="Add a note (optional)" rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, boxSizing: "border-box", resize: "none", wordBreak: "break-word", overflowWrap: "break-word" }}/>
             </div>
-          </div>
-
-          <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 8 }}>Conditions</div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
-            {CONDITIONS.map(c => {
-              const active = reportConditions.includes(c.key);
-              return (
-                <button key={c.key} onClick={() => setReportConditions(p => active ? p.filter(x => x !== c.key) : [...p, c.key])} style={{
-                  padding: "8px 14px", borderRadius: 8,
-                  background: active ? C.primaryLight : C.bg,
-                  border: active ? `1.5px solid ${C.primary}` : `1px solid ${C.border}`,
-                  color: active ? C.primary : C.sub,
-                  fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: ff,
-                }}>{c.label}</button>
-              );
-            })}
-          </div>
-
-          <textarea value={reportText} onChange={e => setReportText(e.target.value)} placeholder="Add a note (optional)" rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, marginBottom: 12, boxSizing: "border-box", resize: "none", wordBreak: "break-word", overflowWrap: "break-word" }}/>
+          )}
 
           <div style={{ display: "flex", gap: 10 }}>
-            <button onClick={() => { setShowCourtReport(false); setReportStacks(0); setReportConditions([]); setReportText(""); }} style={{ flex: 1, padding: 14, borderRadius: 12, background: C.bg, border: `1px solid ${C.border}`, color: C.sub, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: ff }}>Cancel</button>
+            <button onClick={() => { setShowCourtReport(false); setReportStacks(0); setReportConditions([]); setReportText(""); setShowCourtReportExtras(false); }} style={{ flex: 1, padding: 14, borderRadius: 12, background: C.bg, border: `1px solid ${C.border}`, color: C.sub, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: ff }}>Cancel</button>
             <button onClick={submitCourtReport} style={{ flex: 2, padding: 14, borderRadius: 12, background: C.primary, border: "none", color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: ff }}>Submit</button>
           </div>
         </div>
@@ -1541,7 +1539,7 @@ export default function CourtPulse() {
               <div style={{ fontSize: 24, fontWeight: 900, color: sc.color, fontFamily: "'Fraunces', serif" }}>{court.stacks === 0 && court.playing ? "Playing" : `${formatStacks(court.stacks)} ${court.stacks === 1 ? "Stack" : "Stacks"}`}</div>
               <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{getCourtTimestamp(court).text}</div>
             </div>
-            <button onClick={() => { setReportStacks(court.stacks); setShowCourtReport(true); }} style={{ padding: "10px 18px", borderRadius: 10, background: C.primary, border: "none", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: ff }}>
+            <button onClick={() => { setReportStacks(0); setShowCourtReport(true); }} style={{ padding: "10px 18px", borderRadius: 10, background: C.primary, border: "none", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: ff }}>
               Report
             </button>
           </div>
