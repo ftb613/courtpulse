@@ -102,6 +102,13 @@ const MAX_MSG_LENGTH = 1000;
 const MAX_STACKS = 15;
 const FLAG_THRESHOLD = 3; // auto-hide after this many unique flags
 
+// ─── Busyness score (for comparing court vs park reports) ───
+const getBusynessScore = (stacks, playing = false) => {
+  if (stacks > 0) return stacks;
+  if (playing) return 0.01;
+  return 0;
+};
+
 // ─── Freshness windows (ms) based on stacks ───
 const getFreshnessMs = (stacks, playing = false) => {
   if (stacks <= 0 && !playing) return 0;
@@ -293,7 +300,7 @@ export default function CourtPulse() {
         const mapped = [];
         for (let i = 0; i < hourly.time.length; i++) {
           const h = new Date(hourly.time[i]).getHours();
-          if (h < 8 || h > 20) continue; // only show 8am-8pm
+          if (h < 9 || h > 20) continue; // only show 9am-8pm (court hours)
           const icon = weatherCodeToIcon(hourly.weather_code[i]);
           let label;
           if (h === currentHour) label = "Now";
@@ -420,7 +427,10 @@ export default function CourtPulse() {
                 const freshMs = getFreshnessMs(c.stacks, c.playing);
                 const isFresh = c.lastReportAt && (now - c.lastReportAt < freshMs);
                 if (isFresh) return c;
-                return { ...c, stacks: mapping.stacks, playing: mapping.playing };
+                const courtBusy = getBusynessScore(c.stacks, c.playing);
+                const parkBusy = getBusynessScore(mapping.stacks, mapping.playing);
+                if (parkBusy > courtBusy) return { ...c, stacks: mapping.stacks, playing: mapping.playing };
+                return c;
               });
             }
           }
@@ -592,7 +602,10 @@ export default function CourtPulse() {
             const freshMs = getFreshnessMs(c.stacks, c.playing);
             const isFresh = c.lastReportAt && (now - c.lastReportAt < freshMs);
             if (isFresh) return c;
-            return { ...c, stacks: mapping.stacks, playing: mapping.playing };
+            const courtBusy = getBusynessScore(c.stacks, c.playing);
+            const parkBusy = getBusynessScore(mapping.stacks, mapping.playing);
+            if (parkBusy > courtBusy) return { ...c, stacks: mapping.stacks, playing: mapping.playing };
+            return c;
           }));
         }
       }
@@ -623,7 +636,7 @@ export default function CourtPulse() {
 
     typingChannel.subscribe(async (status) => {
       if (status === 'SUBSCRIBED') {
-        await typingChannel.track({ typing: false });
+        await typingChannel.track({ typing: false, t: Date.now() });
       }
     });
 
@@ -662,6 +675,7 @@ export default function CourtPulse() {
   const courtChatEndRef = useRef(null);
   const chatScrollRef = useRef(null);
   const chatTextareaRef = useRef(null);
+  const weatherScrollRef = useRef(null);
 
   // ─── Effects ───
   useEffect(() => {
@@ -676,11 +690,29 @@ export default function CourtPulse() {
     if (selectedCourt && courtChatEndRef.current) courtChatEndRef.current.scrollIntoView({ behavior: "smooth" });
   }, [selectedCourt, courtChats]);
 
+  useEffect(() => {
+    if (someoneTyping) {
+      if (tab === "chat" && chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+      if (selectedCourt && courtChatEndRef.current) courtChatEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [someoneTyping, tab, selectedCourt]);
+
   const handleChatScroll = useCallback((e) => {
     const el = e.target;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
     setShowScrollBtn(!nearBottom);
   }, []);
+
+  // Auto-scroll weather to "Now" hour
+  useEffect(() => {
+    if (weatherScrollRef.current && hourlyWeather.length > 1) {
+      const nowIndex = hourlyWeather.findIndex(h => h.hour === "Now");
+      if (nowIndex > 0) {
+        const scrollPos = nowIndex * 56 - 16; // ~56px per item, offset to show a bit before
+        weatherScrollRef.current.scrollLeft = Math.max(0, scrollPos);
+      }
+    }
+  }, [hourlyWeather]);
 
   const scrollToBottom = useCallback(() => {
     if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
@@ -688,10 +720,10 @@ export default function CourtPulse() {
 
   const broadcastTyping = useCallback(() => {
     if (!typingChannelRef.current) return;
-    typingChannelRef.current.track({ typing: true });
+    typingChannelRef.current.track({ typing: true, t: Date.now() });
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
     typingTimerRef.current = setTimeout(() => {
-      if (typingChannelRef.current) typingChannelRef.current.track({ typing: false });
+      if (typingChannelRef.current) typingChannelRef.current.track({ typing: false, t: Date.now() });
     }, 3000);
   }, []);
 
@@ -723,7 +755,7 @@ export default function CourtPulse() {
     lastSendRef.current = now;
     const text = chatInput.trim().slice(0, MAX_MSG_LENGTH);
     setChatInput("");
-    if (typingChannelRef.current) typingChannelRef.current.track({ typing: false });
+    if (typingChannelRef.current) typingChannelRef.current.track({ typing: false, t: Date.now() });
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
     const { error } = await supabase.from("chat_messages").insert({
       park_id: "marine-park",
@@ -879,7 +911,10 @@ export default function CourtPulse() {
           const freshMs = getFreshnessMs(c.stacks, c.playing);
           const isFresh = c.lastReportAt && (now - c.lastReportAt < freshMs);
           if (isFresh) return c;
-          return { ...c, stacks: mapping.stacks, playing: mapping.playing };
+          const courtBusy = getBusynessScore(c.stacks, c.playing);
+          const parkBusy = getBusynessScore(mapping.stacks, mapping.playing);
+          if (parkBusy > courtBusy) return { ...c, stacks: mapping.stacks, playing: mapping.playing };
+          return c;
         }));
       }
     }
@@ -1135,7 +1170,7 @@ export default function CourtPulse() {
           </div>
         </div>
         {/* Hourly scroll */}
-        <div style={{ display: "flex", gap: 0, overflowX: "auto", padding: "12px 14px", WebkitOverflowScrolling: "touch" }}>
+        <div ref={weatherScrollRef} style={{ display: "flex", gap: 0, overflowX: "auto", padding: "12px 14px", WebkitOverflowScrolling: "touch" }}>
           {hourlyWeather.map((h, i) => (
             <div key={i} style={{
               display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
@@ -1517,8 +1552,8 @@ export default function CourtPulse() {
           onFocus={() => setChatFocused(true)} onBlur={() => setChatFocused(false)}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) { e.preventDefault(); sendMainChat(); if (chatTextareaRef.current) chatTextareaRef.current.style.height = "auto"; } }}
           placeholder="Message..." maxLength={MAX_MSG_LENGTH} rows={1}
-          style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, outline: "none", resize: "none", maxHeight: 120, lineHeight: 1.4, overflow: "auto" }}/>
-        <button onClick={() => { sendMainChat(); if (chatTextareaRef.current) chatTextareaRef.current.style.height = "auto"; }} style={{ width: 38, height: 38, borderRadius: 19, background: chatInput.trim() ? C.primary : C.border, border: "none", cursor: chatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: chatInput.trim() ? "#fff" : C.muted, flexShrink: 0, marginBottom: 1 }}>
+          style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 16, fontFamily: ff, outline: "none", resize: "none", maxHeight: 120, lineHeight: 1.4, overflow: "auto" }}/>
+        <button onClick={() => { sendMainChat(); if (chatTextareaRef.current) { chatTextareaRef.current.style.height = "auto"; chatTextareaRef.current.blur(); } }} style={{ width: 38, height: 38, borderRadius: 19, background: chatInput.trim() ? C.primary : C.border, border: "none", cursor: chatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: chatInput.trim() ? "#fff" : C.muted, flexShrink: 0, marginBottom: 1 }}>
           {Icons.Send(18)}
         </button>
       </div>
@@ -1640,12 +1675,13 @@ export default function CourtPulse() {
         <div style={{ flex: 1, overflowY: "auto", padding: "0 16px 12px" }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 8 }}>Court {selectedCourt} Chat</div>
           {courtMessages.map(msg => chatBubble(msg, selectedCourt))}
+          {typingIndicator}
           <div ref={courtChatEndRef}/>
         </div>
 
         <div style={{ padding: "8px 16px env(safe-area-inset-bottom, 8px)", borderTop: `1px solid ${C.border}`, background: C.card, display: "flex", gap: 8, alignItems: "flex-end" }}>
-          <textarea value={courtChatInput} onChange={e => { setCourtChatInput(e.target.value.slice(0, MAX_MSG_LENGTH)); if (e.target) { e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; } }} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) { e.preventDefault(); sendCourtChat(); } }} placeholder={`Message Court ${selectedCourt}...`} maxLength={MAX_MSG_LENGTH} rows={1} style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, outline: "none", resize: "none", maxHeight: 120, lineHeight: 1.4, overflow: "auto" }}/>
-          <button onClick={sendCourtChat} style={{ width: 38, height: 38, borderRadius: 19, background: courtChatInput.trim() ? C.primary : C.border, border: "none", cursor: courtChatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: courtChatInput.trim() ? "#fff" : C.muted, flexShrink: 0 }}>
+          <textarea value={courtChatInput} onChange={e => { setCourtChatInput(e.target.value.slice(0, MAX_MSG_LENGTH)); broadcastTyping(); if (e.target) { e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; } }} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) { e.preventDefault(); sendCourtChat(); } }} placeholder={`Message Court ${selectedCourt}...`} maxLength={MAX_MSG_LENGTH} rows={1} style={{ flex: 1, padding: "10px 14px", borderRadius: 20, border: `1px solid ${C.border}`, fontSize: 16, fontFamily: ff, outline: "none", resize: "none", maxHeight: 120, lineHeight: 1.4, overflow: "auto" }}/>
+          <button onClick={() => { sendCourtChat(); document.activeElement?.blur(); }} style={{ width: 38, height: 38, borderRadius: 19, background: courtChatInput.trim() ? C.primary : C.border, border: "none", cursor: courtChatInput.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", color: courtChatInput.trim() ? "#fff" : C.muted, flexShrink: 0 }}>
             {Icons.Send(18)}
           </button>
         </div>
