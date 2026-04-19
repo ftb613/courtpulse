@@ -51,7 +51,7 @@ const INIT_COURTS = [
   { id: 2, type: "regular", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
   { id: 3, type: "regular", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
   { id: 4, type: "challenge", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
-  { id: 5, type: "beginner", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
+  { id: 5, type: "regular", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
   { id: 6, type: "regular", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
   { id: 7, type: "regular", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
   { id: 8, type: "challenge", stacks: 0, playing: false, conditions: [], lastReport: null, lastReportAt: null, reporter: null },
@@ -92,6 +92,7 @@ const LEVEL_COLORS = [C.muted, C.green, C.green, C.amber, C.amber, C.red];
 
 // ─── Spam protection ───
 const SEND_COOLDOWN = 3000;
+const REPORT_COOLDOWN = 5000;
 const MAX_MSG_LENGTH = 1000;
 const MAX_STACKS = 15;
 const FLAG_THRESHOLD = 3;
@@ -218,7 +219,7 @@ const Linkify = ({ text, color = C.primary }) => {
 // ─── Status display helpers (3-color system) ───
 const getStackColor = (stacks, playing = false) => {
   if (!playing && stacks === 0) return { bg: C.cream, color: C.muted, label: "No Reports" };
-  if (stacks === 0) return { bg: C.greenLight, color: C.green, label: "Playing" };
+  if (stacks === 0) return { bg: C.greenLight, color: C.green, label: "Playing · No Wait" };
   if (stacks <= 1) return { bg: C.amberLight, color: C.amber, label: stacks === 0.5 ? "½ Stack" : "1 Stack" };
   return { bg: C.redLight, color: C.red, label: `${stacks % 1 === 0.5 ? stacks : Math.floor(stacks)} Stacks` };
 };
@@ -382,6 +383,7 @@ export default function CourtPulse() {
           time: new Date(r.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
           text: r.comment || "",
           level: r.overall_level,
+          status: r.status || null,
         }));
         setReports(mapped);
 
@@ -408,7 +410,7 @@ export default function CourtPulse() {
               return {
                 ...c,
                 stacks: Number(lr.stacks) || 0,
-                playing: true, // Any court report = playing
+                playing: lr.status !== "empty",
                 conditions: lr.conditions || [],
                 lastReport: mins < 1 ? "Just now" : `${mins}m ago`,
                 lastReportAt: new Date(lr.created_at).getTime(),
@@ -549,6 +551,7 @@ export default function CourtPulse() {
         time: new Date(r.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
         text: r.comment || "",
         level: r.overall_level,
+        status: r.status || null,
       };
       setReports(prev => {
         if (prev.some(p => p.id === r.id)) return prev;
@@ -558,7 +561,7 @@ export default function CourtPulse() {
       // Court-specific report → update raw court data
       if (courtNum && r.stacks !== null) {
         setCourts(prev => prev.map(c => c.id === courtNum
-          ? { ...c, stacks: Number(r.stacks), playing: true, conditions: r.conditions || [], lastReport: "Just now", lastReportAt: Date.now(), reporter: r.reporter_name || "Anonymous" }
+          ? { ...c, stacks: Number(r.stacks), playing: r.status !== "empty", conditions: r.conditions || [], lastReport: "Just now", lastReportAt: Date.now(), reporter: r.reporter_name || "Anonymous" }
           : c
         ));
       }
@@ -623,12 +626,14 @@ export default function CourtPulse() {
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [showReportExtras, setShowReportExtras] = useState(false);
   const [showCourtReportExtras, setShowCourtReportExtras] = useState(false);
+  const [pulsingCourt, setPulsingCourt] = useState(null);
 
   const [someoneTyping, setSomeoneTyping] = useState(false);
   const typingTimerRef = useRef(null);
   const typingChannelRef = useRef(null);
   const typingReceiveTimerRef = useRef(null);
   const lastSendRef = useRef(0);
+  const lastReportRef = useRef(0);
 
   const chatEndRef = useRef(null);
   const courtChatEndRef = useRef(null);
@@ -637,6 +642,10 @@ export default function CourtPulse() {
   const weatherScrollRef = useRef(null);
 
   // ─── Effects ───
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [tab]);
+
   useEffect(() => {
     if (tab === "chat") {
       setUnreadChat(false);
@@ -698,7 +707,7 @@ export default function CourtPulse() {
     try { localStorage.setItem("courtpulse_name", name); } catch {}
     try { if (contact) localStorage.setItem("courtpulse_contact", contact); } catch {}
     setUserName(name);
-    (async () => { try { await supabase.from("users").insert({ name, contact }); } catch {} })();
+    (async () => { try { await supabase.from("users").upsert({ name, contact }, { onConflict: "name" }); } catch {} })();
   };
 
   // ─── Chat ───
@@ -757,17 +766,23 @@ export default function CourtPulse() {
   // ─── Court Report ───
   const submitCourtReport = useCallback(async () => {
     if (reportStacks === null || !selectedCourt) return;
+    const now = Date.now();
+    if (now - lastReportRef.current < REPORT_COOLDOWN) { showToast("Slow down! Wait a moment."); return; }
+    lastReportRef.current = now;
     const courtUuid = courtUuidMap.current[selectedCourt];
     if (!courtUuid) return;
 
-    const _stacks = reportStacks;
+    const isEmptyReport = reportStacks === -1;
+    const _stacks = isEmptyReport ? 0 : reportStacks;
+    const _playing = !isEmptyReport;
     const _conditions = reportConditions;
     const _text = reportText;
     const _court = selectedCourt;
+    const _status = isEmptyReport ? "empty" : (_stacks === 0 ? "open" : "in-use");
 
-    // Optimistic UI — any court report = playing
+    // Optimistic UI
     setCourts(p => p.map(c => c.id === _court
-      ? { ...c, stacks: _stacks, playing: true, conditions: _conditions, lastReport: "Just now", lastReportAt: Date.now(), reporter: "You" }
+      ? { ...c, stacks: _stacks, playing: _playing, conditions: _conditions, lastReport: "Just now", lastReportAt: Date.now(), reporter: "You" }
       : c
     ));
 
@@ -777,6 +792,10 @@ export default function CourtPulse() {
     setReportText("");
     setShowCourtReportExtras(false);
     showToast("Update submitted!");
+
+    // Court pulse animation
+    setPulsingCourt(_court);
+    setTimeout(() => setPulsingCourt(null), 600);
 
     // Haptic feedback
     try { navigator.vibrate(50); } catch {}
@@ -791,12 +810,14 @@ export default function CourtPulse() {
           conditions: _conditions,
           comment: _text || null,
           reporter_name: userName,
-          status: _stacks === 0 ? "open" : "in-use",
+          status: _status,
         });
       } catch (e) { console.error("Report submit error:", e); }
       try {
-        const systemText = _stacks === 0
-          ? `${userName} updated: No wait`
+        const systemText = isEmptyReport
+          ? `${userName} updated: Empty`
+          : _stacks === 0
+          ? `${userName} updated: Playing · no wait`
           : `${userName} updated: ${formatStacks(_stacks)} ${_stacks === 1 ? "stack" : "stacks"}`;
         await supabase.from("chat_messages").insert({
           park_id: "marine-park",
@@ -813,6 +834,9 @@ export default function CourtPulse() {
   const submitParkReport = useCallback(async () => {
     const hasContent = parkReportLevel !== null || parkReportConditions.length > 0 || parkReportText.trim();
     if (!hasContent) return;
+    const now = Date.now();
+    if (now - lastReportRef.current < REPORT_COOLDOWN) { showToast("Slow down! Wait a moment."); return; }
+    lastReportRef.current = now;
 
     const levelLabels = ["Empty","Half Playing","All Playing","1 Stack / Half","1 Stack / All","2+ Stacks"];
     let comment = parkReportText.trim() || null;
@@ -872,7 +896,7 @@ export default function CourtPulse() {
       const withinWindow = (now - court.lastReportAt) < freshMs;
 
       if (afterReset && withinWindow) {
-        return { stacks: court.stacks, playing: true, source: "court", reporter: court.reporter, reportAge: now - court.lastReportAt };
+        return { stacks: court.stacks, playing: court.playing, source: "court", reporter: court.reporter, reportAge: now - court.lastReportAt };
       }
     }
 
@@ -908,9 +932,13 @@ export default function CourtPulse() {
 
   // ─── Report display helper ───
   const getReportDisplay = (r) => {
+    if (r.status === "empty") {
+      return { color: C.muted, label: "Empty" };
+    }
     if (r.stacks !== null) {
+      if (r.stacks === 0) return { color: C.green, label: "Playing · no wait" };
       const sc = getStackColor(r.stacks, true);
-      const label = r.stacks === 0 ? "No wait" : `${formatStacks(r.stacks)} stack${r.stacks !== 1 ? "s" : ""}`;
+      const label = `${formatStacks(r.stacks)} stack${r.stacks !== 1 ? "s" : ""}`;
       return { color: sc.color, label };
     }
     if (r.level !== null && r.level !== undefined) {
@@ -984,13 +1012,16 @@ export default function CourtPulse() {
     const botY = topY + cH + 30;
 
     const positions = [
-      { id: 1, row: 0, col: 0 }, { id: 2, row: 0, col: 1 }, { id: 3, row: 0, col: 2 }, { id: 4, row: 0, col: 3 },
-      { id: 5, row: 1, col: 0 }, { id: 6, row: 1, col: 1 }, { id: 7, row: 1, col: 2 }, { id: 8, row: 1, col: 3 },
+      { id: 5, row: 0, col: 0 }, { id: 6, row: 0, col: 1 }, { id: 7, row: 0, col: 2 }, { id: 8, row: 0, col: 3 },
+      { id: 1, row: 1, col: 0 }, { id: 2, row: 1, col: 1 }, { id: 3, row: 1, col: 2 }, { id: 4, row: 1, col: 3 },
     ];
 
     return (
       <div style={{ ...s.section, marginTop: 16 }}>
-        <div style={{ fontSize: 13, fontWeight: 500, color: C.muted, marginBottom: 10 }}>Court Status</div>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: C.muted }}>Court Status</div>
+          <div style={{ fontSize: 11, color: C.muted, opacity: 0.7 }}>Tap a court for details</div>
+        </div>
         <svg width="100%" viewBox={`0 0 ${w} ${h}`} style={{ display: "block" }}>
           <rect x="0" y="0" width={w} height={h} rx="14" fill={C.primary} opacity="0.04"/>
           <rect x="4" y="4" width={w-8} height={h-8} rx="12" fill={C.primary} opacity="0.02"/>
@@ -1007,13 +1038,14 @@ export default function CourtPulse() {
             const y = pos.row === 0 ? topY : botY;
             const cc = COURT_COLOR(display.stacks, display.playing);
             const typeLabel = court.type === "beginner" ? "BEGINNER" : court.type === "challenge" ? "CHALLENGE" : null;
-            const isEmpty = display.source === "none" || (!display.playing && display.stacks === 0);
+            const noReports = display.source === "none";
+            const isEmpty = noReports || (!display.playing && display.stacks === 0);
 
             return (
-              <g key={court.id} onClick={() => setSelectedCourt(court.id)} style={{ cursor: "pointer" }}>
+              <g key={court.id} onClick={() => setSelectedCourt(court.id)} style={{ cursor: "pointer", animation: pulsingCourt === court.id ? "courtPulse 0.6s ease-out" : "none" }}>
                 <rect x={x} y={y} width={cW} height={cH} rx="8" fill={cc.fill} stroke={cc.stroke} strokeWidth="2"/>
 
-                <text x={x+cW/2} y={y+cH/2+(typeLabel ? -2 : 5)} textAnchor="middle" fontSize="22" fontWeight="600" fill={isEmpty ? C.muted : cc.stroke} fontFamily={ff}>{court.id}</text>
+                <text x={x+cW/2} y={y+cH/2+(typeLabel ? -2 : (noReports && !typeLabel ? -2 : 5))} textAnchor="middle" fontSize="22" fontWeight="600" fill={isEmpty ? C.muted : cc.stroke} fontFamily={ff}>{court.id}</text>
 
                 {/* Court type label (muted gray) */}
                 {typeLabel && (
@@ -1023,24 +1055,19 @@ export default function CourtPulse() {
                   </g>
                 )}
 
-                {/* "NO REPORTS" label on empty courts (only if no type label) */}
-                {isEmpty && !typeLabel && (
-                  <g>
-                    <rect x={x+(cW-62)/2} y={y+cH/2+8} width={62} height={16} rx="4" fill="#7A7265" opacity="0.08"/>
-                    <text x={x+cW/2} y={y+cH/2+19.5} textAnchor="middle" fontSize="7" fontWeight="500" fill="#7A7265" fontFamily={ff} opacity="0.5">NO REPORTS</text>
-                  </g>
+                {/* "NO REPORTS" — light text at bottom, only when truly no reports */}
+                {noReports && !typeLabel && (
+                  <text x={x+cW/2} y={y+cH-10} textAnchor="middle" fontSize="6.5" fontWeight="500" fill="#7A7265" fontFamily={ff} opacity="0.4">NO REPORTS</text>
                 )}
-
-                {/* "NO REPORTS" on typed empty courts — below type label */}
-                {isEmpty && typeLabel && (
+                {noReports && typeLabel && (
                   <text x={x+cW/2} y={y+cH/2+33} textAnchor="middle" fontSize="6.5" fontWeight="500" fill="#7A7265" fontFamily={ff} opacity="0.4">NO REPORTS</text>
                 )}
 
-                {/* Stack count badge (3+ stacks only) */}
+                {/* Stack count badge (3+ stacks only, shows ½ for half-stacks) */}
                 {display.stacks >= 3 && display.playing && (
                   <g>
                     <circle cx={x+cW-4} cy={y+4} r="11" fill={C.darkRed} stroke={C.cream} strokeWidth="2"/>
-                    <text x={x+cW-4} y={y+8} textAnchor="middle" fontSize="10" fontWeight="600" fill={C.cream} fontFamily={ff}>{Math.floor(display.stacks)}</text>
+                    <text x={x+cW-4} y={y+8} textAnchor="middle" fontSize="10" fontWeight="600" fill={C.cream} fontFamily={ff}>{display.stacks % 1 === 0.5 ? `${Math.floor(display.stacks)}½` : display.stacks}</text>
                   </g>
                 )}
               </g>
@@ -1165,14 +1192,17 @@ export default function CourtPulse() {
         return (
           <div key={r.id} style={{ ...s.card, padding: "10px 14px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 13, fontWeight: 500, color: C.text }}>
-                {r.court ? `Court ${r.court}` : "Park"}{rd.label ? ` · ${rd.label}` : ""}{r.user ? ` · ${r.user}` : ""}
-              </span>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ width: 8, height: 8, borderRadius: 4, background: rd.color, flexShrink: 0 }}/>
+                <span style={{ fontSize: 13, fontWeight: 500, color: C.text }}>
+                  {r.court ? `Court ${r.court}` : "Park"}{rd.label ? ` · ${rd.label}` : ""}{r.user ? ` · ${r.user}` : ""}
+                </span>
+              </div>
               <span style={{ fontSize: 11, color: C.muted }}>{r.time}</span>
             </div>
-            {r.text && <div style={{ fontSize: 12, color: C.sub, marginTop: 3, wordBreak: "break-word", overflowWrap: "break-word" }}>{r.text}</div>}
+            {r.text && <div style={{ fontSize: 12, color: C.sub, marginTop: 3, paddingLeft: 16, wordBreak: "break-word", overflowWrap: "break-word" }}>{r.text}</div>}
             {r.conditions?.length > 0 && (
-              <div style={{ display: "flex", gap: 4, marginTop: 5 }}>
+              <div style={{ display: "flex", gap: 4, marginTop: 5, paddingLeft: 16 }}>
                 {r.conditions.map(c => (
                   <span key={c} style={{ fontSize: 10, background: C.amberLight, color: C.amber, padding: "2px 8px", borderRadius: 4, fontWeight: 500 }}>{c}</span>
                 ))}
@@ -1259,9 +1289,12 @@ export default function CourtPulse() {
                   color: selected ? "#fff" : C.text,
                   cursor: "pointer", fontFamily: ff, textAlign: "left",
                 }}>
-                  <div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: selected ? "#fff" : C.text }}>{lvl.label}</div>
-                    <div style={{ fontSize: 11, fontWeight: 400, opacity: 0.75, marginTop: 1, color: selected ? "rgba(255,255,255,0.85)" : C.sub }}>{lvl.desc}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    {!selected && <div style={{ width: 10, height: 10, borderRadius: 5, background: lvl.color, flexShrink: 0 }}/>}
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: selected ? "#fff" : C.text }}>{lvl.label}</div>
+                      <div style={{ fontSize: 11, fontWeight: 400, opacity: 0.75, marginTop: 1, color: selected ? "rgba(255,255,255,0.85)" : C.sub }}>{lvl.desc}</div>
+                    </div>
                   </div>
                   {selected && <div style={{ width: 22, height: 22, borderRadius: 11, background: "rgba(255,255,255,0.3)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 600 }}>✓</div>}
                 </button>
@@ -1299,7 +1332,7 @@ export default function CourtPulse() {
                   );
                 })}
               </div>
-              <textarea value={parkReportText} onChange={e => setParkReportText(e.target.value)} placeholder="Add a note (optional)" rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, boxSizing: "border-box", resize: "none", wordBreak: "break-word", overflowWrap: "break-word" }}/>
+              <textarea value={parkReportText} onChange={e => setParkReportText(e.target.value)} placeholder="Add a note (optional)" maxLength={500} rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, boxSizing: "border-box", resize: "none", wordBreak: "break-word", overflowWrap: "break-word" }}/>
             </div>
           )}
         </div>
@@ -1311,13 +1344,16 @@ export default function CourtPulse() {
           const rd = getReportDisplay(r);
           return (
             <div key={r.id} style={{ ...s.card, padding: "10px 14px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ fontSize: 12, fontWeight: 500, color: C.text }}>{r.court ? `Court ${r.court}` : "Park"}{rd.label ? ` · ${rd.label}` : ""} · {r.user}</span>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: 4, background: rd.color, flexShrink: 0 }}/>
+                  <span style={{ fontSize: 12, fontWeight: 500, color: C.text }}>{r.court ? `Court ${r.court}` : "Park"}{rd.label ? ` · ${rd.label}` : ""} · {r.user}</span>
+                </div>
                 <span style={{ fontSize: 10, color: C.muted }}>{r.time}</span>
               </div>
-              {r.text && <div style={{ fontSize: 11, color: C.sub, marginTop: 2, wordBreak: "break-word", overflowWrap: "break-word" }}>{r.text}</div>}
+              {r.text && <div style={{ fontSize: 11, color: C.sub, marginTop: 2, paddingLeft: 16, wordBreak: "break-word", overflowWrap: "break-word" }}>{r.text}</div>}
               {r.conditions?.length > 0 && (
-                <div style={{ display: "flex", gap: 4, marginTop: 5, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: 4, marginTop: 5, paddingLeft: 16, flexWrap: "wrap" }}>
                   {r.conditions.map(c => (
                     <span key={c} style={{ fontSize: 10, background: C.amberLight, color: C.amber, padding: "2px 8px", borderRadius: 4, fontWeight: 500 }}>{c}</span>
                   ))}
@@ -1479,6 +1515,7 @@ export default function CourtPulse() {
     const type = COURT_TYPES[court.type];
     const display = getCourtDisplay(court);
     const sc = getStackColor(display.stacks, display.playing);
+    if (!display.playing && display.source === "court") sc.label = "Empty";
     const courtMessages = courtChats[selectedCourt] || [];
 
     const courtReportModal = showCourtReport ? (() => {
@@ -1491,30 +1528,40 @@ export default function CourtPulse() {
 
           <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 8, textAlign: "center" }}>What's the wait right now?</div>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 16, marginBottom: 8 }}>
-            <button onClick={() => setReportStacks(Math.max(0, reportStacks - 1))} style={{ width: 44, height: 44, borderRadius: 12, background: C.bg, border: `1px solid ${C.border}`, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: C.sub }}>
+            <button onClick={() => setReportStacks(prev => prev <= 0 ? -1 : Math.floor(prev) - 1)} disabled={reportStacks === -1} style={{ width: 44, height: 44, borderRadius: 12, background: C.bg, border: `1px solid ${C.border}`, cursor: reportStacks === -1 ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: reportStacks === -1 ? C.border : C.sub }}>
               {Icons.Minus(20)}
             </button>
             <div style={{ minWidth: 70, textAlign: "center" }}>
-              <div style={{ fontSize: 36, fontWeight: 600, color: getStackColor(reportStacks, true).color, fontFamily: ff }}>{formatStacks(reportStacks)}</div>
-              <div style={{ fontSize: 11, fontWeight: 600, color: getStackColor(reportStacks, true).color, marginTop: -2 }}>{reportStacks === 0 ? "No wait" : getStackColor(reportStacks, true).label}</div>
+              {reportStacks === -1 ? (
+                <>
+                  <div style={{ fontSize: 18, fontWeight: 600, color: C.muted, fontFamily: ff, letterSpacing: "-0.3px" }}>Empty</div>
+                  <div style={{ fontSize: 11, fontWeight: 500, color: C.muted, marginTop: 2 }}>No one here</div>
+                </>
+              ) : (
+                <>
+                  <div style={{ fontSize: reportStacks === 0 ? 20 : 36, fontWeight: 600, color: getStackColor(reportStacks, true).color, fontFamily: ff }}>{reportStacks === 0 ? "Playing" : formatStacks(reportStacks)}</div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: getStackColor(reportStacks, true).color, marginTop: -2 }}>{reportStacks === 0 ? "No wait" : getStackColor(reportStacks, true).label}</div>
+                </>
+              )}
             </div>
-            <button onClick={() => setReportStacks(Math.min(MAX_STACKS, reportStacks + 1))} style={{ width: 44, height: 44, borderRadius: 12, background: reportStacks >= MAX_STACKS ? "#f0ece6" : C.bg, border: `1px solid ${C.border}`, cursor: reportStacks >= MAX_STACKS ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: reportStacks >= MAX_STACKS ? C.border : C.sub }}>
+            <button onClick={() => setReportStacks(prev => prev === -1 ? 0 : Math.min(MAX_STACKS, Math.floor(prev) + 1))} style={{ width: 44, height: 44, borderRadius: 12, background: reportStacks >= MAX_STACKS ? "#f0ece6" : C.bg, border: `1px solid ${C.border}`, cursor: reportStacks >= MAX_STACKS ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: reportStacks >= MAX_STACKS ? C.border : C.sub }}>
               {Icons.Plus(20)}
             </button>
           </div>
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
-            <button onClick={() => setReportStacks(prev => {
+            <button onClick={() => reportStacks >= 0 && setReportStacks(prev => {
               const hasHalf = prev % 1 === 0.5;
               if (hasHalf) return Math.floor(prev);
               return Math.min(MAX_STACKS, prev + 0.5);
             })} style={{
               padding: "6px 18px", borderRadius: 8,
-              background: reportStacks % 1 === 0.5 ? C.primaryLight : C.bg,
-              border: reportStacks % 1 === 0.5 ? `1.5px solid ${C.primary}` : `1px solid ${C.border}`,
-              color: reportStacks % 1 === 0.5 ? C.primary : C.sub,
-              fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: ff,
+              background: reportStacks >= 0 && reportStacks % 1 === 0.5 ? C.primaryLight : C.bg,
+              border: reportStacks >= 0 && reportStacks % 1 === 0.5 ? `1.5px solid ${C.primary}` : `1px solid ${C.border}`,
+              color: reportStacks === -1 ? C.border : (reportStacks % 1 === 0.5 ? C.primary : C.sub),
+              fontSize: 13, fontWeight: 600, cursor: reportStacks === -1 ? "default" : "pointer", fontFamily: ff,
+              opacity: reportStacks === -1 ? 0.35 : 1,
             }}>
-              {reportStacks % 1 === 0.5 ? "Remove ½" : "+ ½ Stack"}
+              {reportStacks >= 0 && reportStacks % 1 === 0.5 ? "Remove ½" : "+ ½ Stack"}
             </button>
           </div>
 
@@ -1542,7 +1589,7 @@ export default function CourtPulse() {
                   );
                 })}
               </div>
-              <textarea value={reportText} onChange={e => setReportText(e.target.value)} placeholder="Add a note (optional)" rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, boxSizing: "border-box", resize: "none", wordBreak: "break-word", overflowWrap: "break-word" }}/>
+              <textarea value={reportText} onChange={e => setReportText(e.target.value)} placeholder="Add a note (optional)" maxLength={500} rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, fontFamily: ff, boxSizing: "border-box", resize: "none", wordBreak: "break-word", overflowWrap: "break-word" }}/>
             </div>
           )}
 
@@ -1574,7 +1621,7 @@ export default function CourtPulse() {
         <div style={{ padding: "12px 16px" }}>
           <div style={{ ...s.card, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px" }}>
             <div>
-              <div style={{ fontSize: 24, fontWeight: 600, color: sc.color, fontFamily: ff }}>{display.playing && display.stacks === 0 ? "No wait" : `${formatStacks(display.stacks)} ${display.stacks === 1 ? "Stack" : "Stacks"}`}</div>
+              <div style={{ fontSize: 24, fontWeight: 600, color: sc.color, fontFamily: ff }}>{!display.playing && display.source !== "none" ? "Empty" : display.playing && display.stacks === 0 ? "Playing · no wait" : display.source === "none" ? "No reports" : `${formatStacks(display.stacks)} ${display.stacks === 1 ? "Stack" : "Stacks"}`}</div>
               <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{getTimestampText(court)}</div>
             </div>
             <button onClick={() => { setReportStacks(0); setShowCourtReport(true); }} style={{ padding: "10px 18px", borderRadius: 10, background: C.primary, border: "none", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: ff }}>
